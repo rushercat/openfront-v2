@@ -2,9 +2,10 @@
  * BarPass — instanced health/progress bars and warship veterancy pips.
  *
  * Three draw calls per frame (all share one program + instance buffer):
- *   1. Health bars (11x3 tiles, above warships)
+ *   1. Health bars (11x3 tiles, above warships and aircraft)
  *   2. Progress bars (14x3 tiles, below structures — construction + missile readiness)
  *   3. Veterancy pips (solid gold rank bars stacked at a warship's bottom-right)
+ *   4. Structure health bars (14x3 tiles, above a damaged structure)
  *
  * Data flow:
  *   UnitState.health / .missileTimerQueue / .constructionStartTick → CPU progress
@@ -14,11 +15,19 @@
 
 import { UnitType } from "@openfront/engine-api/game/GameTypes";
 import type { Config } from "@openfront/engine-lib/configuration/Config";
+import { maxHealthAtLevel } from "@openfront/engine-lib/game/UnitHealth";
 import { maxHealthWithVeterancy } from "@openfront/engine-lib/game/Veterancy";
 import type { RendererConfig, UnitState } from "../../types";
-import { UT_MISSILE_SILO, UT_SAM_LAUNCHER } from "../../types";
+import {
+  STRUCTURE_TYPES,
+  UT_AA_DEFENSE,
+  UT_MISSILE_SILO,
+  UT_SAM_LAUNCHER,
+  UT_WARSHIP,
+} from "../../types";
 import type { RenderSettings } from "../RenderSettings";
 import { createProgram } from "../utils/GlUtils";
+import type { UnitGlide } from "../utils/UnitGlide";
 
 import barFragSrc from "../shaders/bar/bar.frag.glsl?raw";
 import barVertSrc from "../shaders/bar/bar.vert.glsl?raw";
@@ -29,6 +38,18 @@ import barVertSrc from "../shaders/bar/bar.vert.glsl?raw";
 
 const FLOATS_PER_INSTANCE = 3; // x, y, progress
 const BYTES_PER_INSTANCE = FLOATS_PER_INSTANCE * 4;
+
+/** Values per glide record: (instance, fromX, fromY, toX, toY). */
+const SEG_STRIDE = 5;
+
+/** Moves the gliding bars in `data` to `alpha` of the way along their step. */
+function lerpSegs(segs: number[], data: Float32Array, alpha: number): void {
+  for (let i = 0; i < segs.length; i += SEG_STRIDE) {
+    const off = segs[i] * FLOATS_PER_INSTANCE;
+    data[off] = segs[i + 1] + (segs[i + 3] - segs[i + 1]) * alpha;
+    data[off + 1] = segs[i + 2] + (segs[i + 4] - segs[i + 2]) * alpha;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // BarPass
@@ -62,10 +83,20 @@ export class BarPass {
   private progressCount = 0;
   private veterancyData: Float32Array;
   private veterancyCount = 0;
+  private structureHealthData: Float32Array;
+  private structureHealthCount = 0;
+
+  /** Gliding units' bars: (instance, fromX, fromY, toX, toY) per bar, so a
+   *  bar follows its ship between ticks (UnitGlide) instead of hopping. */
+  private healthSegs: number[] = [];
+  private progressSegs: number[] = [];
+  private veterancySegs: number[] = [];
+  private glide: UnitGlide | null = null;
 
   private mapW: number;
-  private warshipMaxHealth: number;
   private veterancyHealthBonus: number;
+  /** unitType string → level 1 max health (0 = the type has no health). */
+  private baseMaxHealth = new Map<string, number>();
 
   constructor(
     gl: WebGL2RenderingContext,
@@ -76,7 +107,6 @@ export class BarPass {
     this.gl = gl;
     this.settings = settings;
     this.mapW = header.mapWidth;
-    this.warshipMaxHealth = config.unitInfo(UnitType.Warship).maxHealth ?? 0;
     this.veterancyHealthBonus = config.warshipVeterancyHealthBonus();
 
     // --- Shader program ---
@@ -98,6 +128,9 @@ export class BarPass {
     this.healthData = new Float32Array(this.maxBars * FLOATS_PER_INSTANCE);
     this.progressData = new Float32Array(this.maxBars * FLOATS_PER_INSTANCE);
     this.veterancyData = new Float32Array(this.maxBars * FLOATS_PER_INSTANCE);
+    this.structureHealthData = new Float32Array(
+      this.maxBars * FLOATS_PER_INSTANCE,
+    );
 
     // --- VAO: unit quad + instanced data ---
     this.vao = gl.createVertexArray()!;
@@ -129,6 +162,11 @@ export class BarPass {
     gl.bindVertexArray(null);
   }
 
+  /** The units' glide between ticks (UnitPass), so bars move with them. */
+  setGlide(glide: UnitGlide): void {
+    this.glide = glide;
+  }
+
   /** Rebuild bar instance data from current unit state. */
   updateBars(
     mobileUnits: Map<number, UnitState>,
@@ -138,19 +176,35 @@ export class BarPass {
     this.healthCount = 0;
     this.progressCount = 0;
     this.veterancyCount = 0;
+    this.structureHealthCount = 0;
+    this.healthSegs.length = 0;
+    this.progressSegs.length = 0;
+    this.veterancySegs.length = 0;
 
-    // --- Health bars + veterancy pips (warships) ---
-    // Only warships carry health among mobile units, so this loop is effectively
-    // warship-only.
+    // --- Health bars (warships, aircraft) + veterancy pips (warships) ---
     for (const unit of mobileUnits.values()) {
+      // A surfacing nuclear submarine: how far until it can fire.
+      if (unit.submarineMode === 1 && unit.submarineReadyTick !== undefined) {
+        const total = this.config.submarineSurfaceTicks();
+        const left = unit.submarineReadyTick - gameTick;
+        if (total > 0) {
+          this.pushProgress(unit, Math.min(1, Math.max(0, 1 - left / total)));
+        }
+      }
       if (unit.health === null || unit.health <= 0) continue;
+      const base = this.baseMaxHealthOf(unit.unitType);
+      if (base <= 0) continue;
       // Veteran warships have a higher effective max health, so a full veteran
       // ship reads as full. Shared with the engine's UnitImpl.maxHealth().
-      const maxHealth = maxHealthWithVeterancy(
-        this.warshipMaxHealth,
-        unit.veterancy,
-        this.veterancyHealthBonus,
-      );
+      // Only warships have veterancy.
+      const maxHealth =
+        unit.unitType === UT_WARSHIP
+          ? maxHealthWithVeterancy(
+              base,
+              unit.veterancy,
+              this.veterancyHealthBonus,
+            )
+          : base;
       if (unit.health < maxHealth) {
         this.pushHealth(unit, unit.health / maxHealth);
       }
@@ -159,12 +213,35 @@ export class BarPass {
       }
     }
 
-    // --- Progress bars (structures) ---
+    // --- Progress bars + health bars (structures) ---
     for (const unit of structures.values()) {
       if (!unit.isActive) continue;
+      // The renderer hands over every unit here (Upload.updateStructures);
+      // ships, aircraft and tanks already have their bar above, so a damaged
+      // one would otherwise get a second one underneath.
+      if (!STRUCTURE_TYPES.has(unit.unitType)) continue;
       const progress = this.computeStructureProgress(unit, gameTick);
       if (progress !== null) this.pushProgress(unit, progress);
+
+      // A structure aircraft have damaged. An upgraded one has more health
+      // (shared with the engine's UnitImpl.maxHealth()).
+      if (unit.health === null || unit.health <= 0) continue;
+      const base = this.baseMaxHealthOf(unit.unitType);
+      if (base <= 0) continue;
+      const maxHealth = maxHealthAtLevel(base, unit.level);
+      if (unit.health < maxHealth) {
+        this.pushStructureHealth(unit, unit.health / maxHealth);
+      }
     }
+  }
+
+  private baseMaxHealthOf(unitType: string): number {
+    let base = this.baseMaxHealth.get(unitType);
+    if (base === undefined) {
+      base = this.config.unitInfo(unitType as UnitType).maxHealth ?? 0;
+      this.baseMaxHealth.set(unitType, base);
+    }
+    return base;
   }
 
   /** Render bars. Call once per frame after FX, before names. */
@@ -172,12 +249,20 @@ export class BarPass {
     if (
       this.healthCount === 0 &&
       this.progressCount === 0 &&
-      this.veterancyCount === 0
+      this.veterancyCount === 0 &&
+      this.structureHealthCount === 0
     )
       return;
 
     const gl = this.gl;
     const b = this.settings.bar;
+
+    if (this.glide !== null) {
+      const alpha = this.glide.alpha(performance.now());
+      lerpSegs(this.healthSegs, this.healthData, alpha);
+      lerpSegs(this.progressSegs, this.progressData, alpha);
+      lerpSegs(this.veterancySegs, this.veterancyData, alpha);
+    }
 
     gl.useProgram(this.program);
     gl.uniformMatrix3fv(this.uCamera, false, cameraMat);
@@ -226,6 +311,26 @@ export class BarPass {
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.progressCount);
     }
 
+    // Structure health bars (the progress bar's size, under the icon)
+    if (this.structureHealthCount > 0) {
+      gl.uniform2f(this.uBarSize, b.progressBarW, b.progressBarH);
+      gl.uniform2f(
+        this.uBarOffset,
+        -b.progressBarW / 2,
+        b.structureHealthBarOffsetY,
+      );
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuf);
+      gl.bufferSubData(
+        gl.ARRAY_BUFFER,
+        0,
+        this.structureHealthData.subarray(
+          0,
+          this.structureHealthCount * FLOATS_PER_INSTANCE,
+        ),
+      );
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.structureHealthCount);
+    }
+
     // Veterancy pips (solid gold rank bars, bottom-right of warship sprites)
     if (this.veterancyCount > 0) {
       gl.uniform1f(this.uSolid, 1);
@@ -266,6 +371,7 @@ export class BarPass {
     this.healthData[off] = unit.pos % this.mapW;
     this.healthData[off + 1] = (unit.pos - this.healthData[off]) / this.mapW;
     this.healthData[off + 2] = progress;
+    this.pushGlide(this.healthSegs, this.healthCount, unit);
     this.healthCount++;
   }
 
@@ -279,8 +385,34 @@ export class BarPass {
       this.veterancyData[off] = x;
       this.veterancyData[off + 1] = y;
       this.veterancyData[off + 2] = slot; // vertical stack slot, read by the shader
+      this.pushGlide(this.veterancySegs, this.veterancyCount, unit);
       this.veterancyCount++;
     }
+  }
+
+  /** Records that bar `index` belongs to a unit gliding this tick. */
+  private pushGlide(segs: number[], index: number, unit: UnitState): void {
+    const from = this.glide?.from.get(unit.id);
+    if (from === undefined) return;
+    const fx = from % this.mapW;
+    const tx = unit.pos % this.mapW;
+    segs.push(
+      index,
+      fx,
+      (from - fx) / this.mapW,
+      tx,
+      (unit.pos - tx) / this.mapW,
+    );
+  }
+
+  private pushStructureHealth(unit: UnitState, progress: number): void {
+    if (this.structureHealthCount >= this.maxBars) return;
+    const off = this.structureHealthCount * FLOATS_PER_INSTANCE;
+    const x = unit.pos % this.mapW;
+    this.structureHealthData[off] = x;
+    this.structureHealthData[off + 1] = (unit.pos - x) / this.mapW;
+    this.structureHealthData[off + 2] = progress;
+    this.structureHealthCount++;
   }
 
   private pushProgress(unit: UnitState, progress: number): void {
@@ -290,6 +422,7 @@ export class BarPass {
     this.progressData[off] = x;
     this.progressData[off + 1] = (unit.pos - x) / this.mapW;
     this.progressData[off + 2] = progress;
+    this.pushGlide(this.progressSegs, this.progressCount, unit);
     this.progressCount++;
   }
 
@@ -315,10 +448,11 @@ export class BarPass {
       return Math.min(1, Math.max(0, elapsed / duration));
     }
 
-    // Missile readiness (Silo / SAM)
+    // Missile readiness (Silo / SAM / AA Defense)
     if (
       unit.unitType === UT_MISSILE_SILO ||
-      unit.unitType === UT_SAM_LAUNCHER
+      unit.unitType === UT_SAM_LAUNCHER ||
+      unit.unitType === UT_AA_DEFENSE
     ) {
       const readiness = this.missileReadiness(unit, gameTick);
       if (readiness < 1) return readiness;
@@ -337,7 +471,9 @@ export class BarPass {
     const cooldown =
       unit.unitType === UT_SAM_LAUNCHER
         ? this.config.SAMCooldown()
-        : this.config.SiloCooldown();
+        : unit.unitType === UT_AA_DEFENSE
+          ? this.config.aaDefenseCooldown()
+          : this.config.SiloCooldown();
 
     let readiness = ready / maxMissiles;
     for (const timer of unit.missileTimerQueue) {

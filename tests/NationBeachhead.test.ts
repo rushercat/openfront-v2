@@ -79,8 +79,10 @@ describe("Nation beachhead boats", () => {
     expect(landedAt).toBeGreaterThan(0);
     expect(followedAt).toBe(landedAt);
     const [followUp] = attacks(false) as AttackExecution[];
-    // Everything left at home goes in: the reserve ratio is 0 here
-    expect(followUp["startTroops"]).toBe(99_000);
+    // A normal attack, not everything left at home: against a weak island
+    // (10k vs ~99k) that's about 22 %, never all 99k
+    expect(followUp["startTroops"]).toBeGreaterThan(0.2 * 98_000);
+    expect(followUp["startTroops"]).toBeLessThan(0.25 * 99_000);
 
     // Only once, however much the troops grow back
     for (let i = 0; i < 30; i++) {

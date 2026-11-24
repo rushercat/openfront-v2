@@ -28,6 +28,8 @@ export class InGamePromo extends LitElement implements Controller {
   init() {}
 
   tick() {
+    // openfront v2: no in-game ads.
+    if (window.adsEnabled !== true) return;
     if (!this.game.inSpawnPhase()) {
       // Every tick rather than once, so a rail loaded again mid-game cannot
       // stay. Cheap: it returns at once unless a rail is loaded.

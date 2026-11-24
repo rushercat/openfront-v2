@@ -1,6 +1,7 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
 import { UnitType } from "@openfront/engine-api/game/GameTypes";
 import { GameUpdateType } from "@openfront/engine-api/game/GameUpdates";
+import { structureHealthFraction } from "@openfront/engine-lib/game/UnitHealth";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import {
   snapshotType,
@@ -31,13 +32,17 @@ class TradeStationStopHandler implements TrainStopHandler {
   ): void {
     const stationOwner = station.unit.owner();
     const trainOwner = trainExecution.owner();
-    const gold = mg
+    const fullGold = mg
       .config()
       .trainGold(
         rel(trainOwner, stationOwner),
         trainExecution.tradeStopsVisited(),
         trainOwner,
       );
+    // A damaged city or port pays out in proportion to its health.
+    const health = structureHealthFraction(station.unit);
+    const gold =
+      health >= 1 ? fullGold : BigInt(Math.floor(Number(fullGold) * health));
     // Share revenue with the station owner if it's not the current player
     if (trainOwner !== stationOwner) {
       stationOwner.addGold(gold, station.tile());

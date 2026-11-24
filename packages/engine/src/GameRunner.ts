@@ -6,6 +6,7 @@ import { GameMap, TileRef } from "@openfront/engine-api/game/GameMap";
 import {
   AllPlayers,
   BuildableUnit,
+  Cell,
   CustomGameMap,
   GameMapSize,
   GameType,
@@ -13,6 +14,7 @@ import {
   HumanDisconnects,
   HumanStatsSnapshot,
   NameViewData,
+  Nation,
   PlayerActions,
   PlayerBorderTiles,
   PlayerBuildableUnitType,
@@ -22,6 +24,7 @@ import {
   PlayerType,
   Structures,
   UnitType,
+  GameFeature,
 } from "@openfront/engine-api/game/GameTypes";
 import {
   ErrorUpdate,
@@ -35,24 +38,37 @@ import {
   MapMetadata,
 } from "@openfront/engine-api/game/MapFiles";
 import { ClientID, GameStartInfo, Turn } from "@openfront/engine-api/Schemas";
+import {
+  assignScenarioNations as assignHistoricalNations,
+  type HistoricalScenario,
+  scenarioForConfig,
+  type ScenarioNation,
+} from "@openfront/engine-lib/game/HistoricalScenarios";
 import { packUnitUpdates } from "@openfront/engine-lib/game/PackedUnitUpdates";
 import { loadTerrainMap } from "@openfront/engine-lib/game/TerrainMapLoader";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import { simpleHash } from "@openfront/engine-lib/Util";
 import { EngineConfig } from "./configuration/EngineConfig";
 import { applyEditorCommand } from "./editor/EditorCommands";
+import { CapitalSystemExecution } from "./execution/CapitalExecution";
 import { structureExecution } from "./execution/ConstructionExecution";
 import { DoomsdayClockExecution } from "./execution/DoomsdayClockExecution";
+import { DraftExecution } from "./execution/DraftExecution";
 import { Executor } from "./execution/ExecutionManager";
+import { HistoricalScenarioExecution } from "./execution/HistoricalScenarioExecution";
+import { MissionExecution } from "./execution/MissionExecution";
 import { PlayerExecution } from "./execution/PlayerExecution";
+import { PoliticsExecution } from "./execution/PoliticsExecution";
 import { RecomputeRailClusterExecution } from "./execution/RecomputeRailClusterExecution";
 import { SpawnTimerExecution } from "./execution/SpawnTimerExecution";
+import { UnrestExecution } from "./execution/UnrestExecution";
 import { WinCheckExecution } from "./execution/WinCheckExecution";
 import { Game, Player } from "./game/Game";
 import { createGame } from "./game/GameImpl";
 import { humanDisconnects, humanStatsSnapshot } from "./game/HumanStats";
 import { placeName, placeSpawnName } from "./game/NameBoxCalculator";
 import { createNationsForGame } from "./game/NationCreation";
+import { PathFinding } from "./pathfinding/PathFinder";
 import {
   readSnapshotHeader,
   restoreGame,
@@ -72,6 +88,18 @@ export async function createGameRunner(
   const gameMap = await loadGameMap(gameStart.config, map);
   const random = new PseudoRandom(simpleHash(gameStart.gameID));
 
+  // A historical scenario: humans play the nations they were assigned (under
+  // that nation's flag), and AI nations play the rest.
+  const scenario = scenarioForConfig(gameStart.config);
+  const scenarioAssigned =
+    scenario === null
+      ? null
+      : assignHistoricalNations(
+          scenario,
+          gameStart.players.map((p) => p.clientID),
+          gameStart.config.scenarioAssignments,
+        );
+
   const humans = gameStart.players.map((p) => {
     return new PlayerInfo(
       p.username,
@@ -82,16 +110,20 @@ export async function createGameRunner(
       p.clanTag,
       p.friends ?? [],
       p.teamIndex ?? null,
+      scenarioAssigned?.get(p.clientID)?.flag ?? null,
     );
   });
 
-  const nations = createNationsForGame(
-    gameStart,
-    gameMap.nations,
-    gameMap.additionalNations,
-    humans.length,
-    random,
-  );
+  const nations =
+    scenario === null
+      ? createNationsForGame(
+          gameStart,
+          gameMap.nations,
+          gameMap.additionalNations,
+          humans.length,
+          random,
+        )
+      : scenarioNations(scenario, scenarioAssigned!, random);
 
   const game: Game = createGame(
     humans,
@@ -115,6 +147,34 @@ export async function createGameRunner(
   );
   if (!editor) gr.init();
   return gr;
+}
+
+/** The AI nations of a scenario: every nation no human was assigned. */
+function scenarioNations(
+  scenario: HistoricalScenario,
+  assigned: Map<string, ScenarioNation>,
+  random: PseudoRandom,
+): Nation[] {
+  const taken = new Set([...assigned.values()].map((n) => n.key));
+  return scenario.nations
+    .filter((n) => !taken.has(n.key))
+    .map(
+      (n) =>
+        new Nation(
+          new Cell(n.seeds[0].x, n.seeds[0].y),
+          new PlayerInfo(
+            n.name,
+            PlayerType.Nation,
+            null,
+            random.nextID(),
+            false,
+            null,
+            [],
+            null,
+            n.flag,
+          ),
+        ),
+    );
 }
 
 /**
@@ -255,10 +315,19 @@ export class GameRunner {
     if (this.game.config().gameConfig().gameType !== GameType.Singleplayer) {
       this.game.addExecution(new SpawnTimerExecution());
     }
-    if (this.game.config().spawnNations()) {
+    const scenario = scenarioForConfig(this.game.config().gameConfig());
+    if (scenario !== null) {
+      // Before the nations' executions, so their land is there first.
+      this.game.addExecution(new HistoricalScenarioExecution(scenario.id));
+      if (this.game.config().gameConfig().scenarioMissions === true) {
+        // After the scenario's setup, so missions are dealt on its land.
+        this.game.addExecution(new MissionExecution(this.execManager.gameID()));
+      }
+    }
+    if (this.game.config().spawnNations() || scenario !== null) {
       this.game.addExecution(...this.execManager.nationExecutions());
     }
-    if (this.game.config().isRandomSpawn()) {
+    if (this.game.config().isRandomSpawn() && scenario === null) {
       this.game.addExecution(...this.execManager.spawnPlayers());
     }
     if (this.game.config().bots() > 0) {
@@ -271,6 +340,10 @@ export class GameRunner {
 
   /** What every running game has, however it started. */
   private addRunningGameExecutions(): void {
+    // Rails come with factories: set their search up while the game loads.
+    if (!this.game.config().isUnitDisabled(UnitType.Factory)) {
+      PathFinding.prepareRail(this.game);
+    }
     this.game.addExecution(new WinCheckExecution());
     if (this.game.config().doomsdayClockConfig().enabled) {
       this.game.addExecution(new DoomsdayClockExecution());
@@ -279,6 +352,18 @@ export class GameRunner {
       this.game.addExecution(
         new RecomputeRailClusterExecution(this.game.railNetwork()),
       );
+    }
+    if (!this.game.config().isFeatureDisabled(GameFeature.Capital)) {
+      this.game.addExecution(new CapitalSystemExecution());
+    }
+    if (!this.game.config().isFeatureDisabled(GameFeature.Unrest)) {
+      this.game.addExecution(new UnrestExecution(this.execManager.gameID()));
+    }
+    if (!this.game.config().isFeatureDisabled(GameFeature.Politics)) {
+      this.game.addExecution(new PoliticsExecution(this.execManager.gameID()));
+    }
+    if (this.game.config().gameConfig().draft?.enabled === true) {
+      this.game.addExecution(new DraftExecution(this.execManager.gameID()));
     }
   }
 

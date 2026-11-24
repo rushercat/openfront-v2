@@ -34,6 +34,12 @@ import { AttackExecution } from "./AttackExecution";
 
 const malusForRetreat = 25;
 
+/**
+ * Share of the troops a nation means to send that actually sits in its
+ * transport boat; the rest follows when the boat lands.
+ */
+const NATION_BOAT_CREW_SHARE = 0.01;
+
 export class TransportShipExecution implements Execution {
   private active = true;
 
@@ -53,6 +59,8 @@ export class TransportShipExecution implements Execution {
   private motionPlanDst: TileRef | null = null;
 
   private originalOwner: Player;
+  /** Troops a nation sends after its token crew once the boat has landed. */
+  private reinforcement = 0;
 
   constructor(
     private attacker: Player,
@@ -118,6 +126,18 @@ export class TransportShipExecution implements Execution {
       .config()
       .boatAttackAmount(this.attacker, this.target);
     this.troops = Math.min(this.troops, this.attacker.troops());
+
+    // A nation risks only a token crew at sea: the rest of the troops it
+    // means to send follow once the boat has landed (taken from what it has
+    // then). Players and tribes still put everything in the boat.
+    if (this.attacker.type() === PlayerType.Nation && this.troops > 1) {
+      const onBoard = Math.max(
+        1,
+        Math.floor(this.troops * NATION_BOAT_CREW_SHARE),
+      );
+      this.reinforcement = this.troops - onBoard;
+      this.troops = onBoard;
+    }
 
     this.dst = targetTransportTile(this.mg, this.attacker, this.ref);
 
@@ -270,13 +290,35 @@ export class TransportShipExecution implements Execution {
           }
           return;
         }
-        this.attacker.conquer(this.dst);
-        if (this.target.isPlayer() && this.attacker.isFriendly(this.target)) {
+        // A decree (ceasefire, safe zone, …) forbids the landing now: the
+        // troops go home instead.
+        const landOwner = this.mg.owner(this.dst);
+        if (
+          landOwner.isPlayer() &&
+          this.mg.politics()?.forbidsAttack(this.attacker, landOwner)
+        ) {
           this.attacker.addTroops(this.boat.troops());
+          this.boat.delete(false);
+          this.active = false;
+          return;
+        }
+        this.attacker.conquer(this.dst);
+        let landed = this.boat.troops();
+        if (this.target.isPlayer() && this.attacker.isFriendly(this.target)) {
+          this.attacker.addTroops(landed);
         } else {
+          // A nation's token crew landed: the rest follows now, as far as
+          // it still has the troops.
+          const followUp = Math.min(
+            this.reinforcement,
+            Math.floor(this.attacker.troops()),
+          );
+          if (followUp > 0) {
+            landed += this.attacker.removeTroops(followUp);
+          }
           this.mg.addExecution(
             new AttackExecution(
-              this.boat.troops(),
+              landed,
               this.attacker,
               this.target.id(),
               this.dst,
@@ -284,13 +326,12 @@ export class TransportShipExecution implements Execution {
             ),
           );
         }
+        this.reinforcement = 0;
         this.boat.delete(false);
         this.active = false;
 
         // Record stats
-        this.mg
-          .stats()
-          .boatArriveTroops(this.attacker, this.target, this.boat.troops());
+        this.mg.stats().boatArriveTroops(this.attacker, this.target, landed);
         return;
       case PathStatus.NEXT:
         this.boat.move(result.node);
@@ -369,6 +410,7 @@ export class TransportShipExecution implements Execution {
       attacker: w.player(this.attacker),
       ref: this.ref,
       troops: this.troops,
+      reinforcement: this.reinforcement,
     });
   }
 
@@ -391,6 +433,7 @@ export class TransportShipExecution implements Execution {
     this.attacker = r.player(s.attacker);
     this.ref = s.ref;
     this.troops = s.troops;
+    this.reinforcement = s.reinforcement ?? 0;
   }
 }
 
@@ -413,6 +456,8 @@ const TransportShipExecutionStateSchema = z.object({
   // Unvalidated until init() checks it.
   ref: zInt(),
   troops: zNum(),
+  /** A nation's follow-up troops (absent in older snapshots). */
+  reinforcement: zNum().optional(),
 });
 type TransportShipExecutionState = z.infer<
   typeof TransportShipExecutionStateSchema

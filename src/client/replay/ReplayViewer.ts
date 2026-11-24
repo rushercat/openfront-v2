@@ -61,6 +61,7 @@ import { GoToPlayerEvent } from "../TransformHandler";
 import { PauseGameIntentEvent } from "../Transport";
 // Defines #game-settings before start() wires its map layers.
 import "../UserSettingModal";
+import { loadMatchSummary } from "../chronicle/LocalMatchStore";
 import type { UserSettingModal } from "../UserSettingModal";
 import {
   GRAPHICS_KEY,
@@ -75,8 +76,8 @@ import type {
   ReplayData,
   ReplayHeader,
 } from "./codec/ReplayTypes";
-import { terrainOf } from "./codec/Terrain";
 import "./ContinueGameModal";
+import { terrainOf } from "./codec/Terrain";
 import type {
   ContinueGameModal,
   ContinuePlayerOption,
@@ -245,6 +246,15 @@ export class ReplayViewer extends LitElement {
    */
   private async open(): Promise<void> {
     this.partial = false;
+    // A game of ours whose replay expired (only the newest are kept unless
+    // saved): its processed copy goes with it.
+    const summary = await loadMatchSummary(this.gameID).catch(() => null);
+    if (this.abort.signal.aborted) return;
+    if (summary?.replayExpired === true) {
+      void replayStore.remove(this.gameID);
+      this.fail(translateText("replay_viewer.unavailable_expired"));
+      return;
+    }
     const stored = await replayStore.get(this.gameID);
     if (this.abort.signal.aborted) return;
     if (stored !== undefined) {
@@ -265,6 +275,9 @@ export class ReplayViewer extends LitElement {
         return;
       case "unreachable":
         this.fail(translateText("replay_viewer.unavailable_unreachable"));
+        return;
+      case "expired":
+        this.fail(translateText("replay_viewer.unavailable_expired"));
         return;
       case "other_build": {
         const url = await versionedViewerUrl(this.gameID);

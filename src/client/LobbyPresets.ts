@@ -2,6 +2,7 @@ import {
   Difficulty,
   GameMapType,
   GameMode,
+  GameFeature,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
 import { MAX_BOTS, TeamCountConfigSchema } from "@openfront/engine-api/Schemas";
@@ -36,6 +37,7 @@ export const LobbyPresetConfigSchema = z.object({
   maxTimer: z.boolean().optional(),
   maxTimerValue: z.number().int().min(1).max(120).optional(),
   disabledUnits: z.enum(UnitType).array().optional(),
+  disabledFeatures: z.enum(GameFeature).array().optional(),
   goldMultiplier: z.boolean().optional(),
   goldMultiplierValue: z.number().min(0.1).max(1000).optional(),
   startingGold: z.boolean().optional(),

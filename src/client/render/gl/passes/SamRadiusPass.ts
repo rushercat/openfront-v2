@@ -140,6 +140,41 @@ function computeUncoveredArcs(a: SAMCircle, circles: SAMCircle[]): Interval[] {
   return uncovered;
 }
 
+/** Angular steps of about this many tiles when an arc is filtered. */
+const FILTER_STEP_TILES = 1.5;
+
+/**
+ * The parts of `arcs` on circle `c` whose points `keep` accepts, sampled
+ * about every FILTER_STEP_TILES along the circle.
+ */
+function keepArcParts(
+  c: SAMCircle,
+  arcs: Interval[],
+  keep: (x: number, y: number) => boolean,
+): Interval[] {
+  const out: Interval[] = [];
+  const step = Math.min(0.5, FILTER_STEP_TILES / Math.max(1, c.radius));
+  for (const [start, end] of arcs) {
+    let runStart: number | null = null;
+    for (let a = start; a < end - EPS; a += step) {
+      const b = Math.min(end, a + step);
+      const mid = (a + b) / 2;
+      const ok = keep(
+        c.x + Math.cos(mid) * c.radius,
+        c.y + Math.sin(mid) * c.radius,
+      );
+      if (ok && runStart === null) {
+        runStart = a;
+      } else if (!ok && runStart !== null) {
+        out.push([runStart, a]);
+        runStart = null;
+      }
+    }
+    if (runStart !== null) out.push([runStart, end]);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Pass
 // ---------------------------------------------------------------------------
@@ -177,6 +212,8 @@ export class SAMRadiusPass {
   private static readonly GEOMETRY_REFRESH_INTERVAL_MS = 50; // 20Hz refresh rate
   private dirtyGroups: Set<number> = new Set();
   private readonly colorScratch: number[] = [0, 0, 0];
+  /** setCustomCircles: where along the outline it is drawn at all. */
+  private arcFilter: ((x: number, y: number) => boolean) | null = null;
 
   // Owner-color mode fields
   private paletteData: Float32Array | null = null;
@@ -499,7 +536,10 @@ export class SAMRadiusPass {
 
       for (let i = 0; i < groupCircles.length; i++) {
         const c = groupCircles[i];
-        const arcs = computeUncoveredArcs(c, groupCircles);
+        let arcs = computeUncoveredArcs(c, groupCircles);
+        if (this.arcFilter !== null) {
+          arcs = keepArcParts(c, arcs, this.arcFilter);
+        }
         for (let j = 0; j < arcs.length; j++) {
           const [arcStart, arcEnd] = arcs[j];
           this.instanceBuf.ensureCapacity(count + 1);
@@ -532,6 +572,67 @@ export class SAMRadiusPass {
         count * FLOATS_PER_INSTANCE,
       );
     }
+  }
+
+  /**
+   * Draws these circles' union instead of SAM ranges (a second instance of
+   * this pass outlines how far a selected tank may drive: circles around its
+   * owner's border). Null hides them.
+   */
+  setCustomCircles(
+    circles: readonly { x: number; y: number; radius: number }[] | null,
+    color: readonly [number, number, number],
+    /** Only the parts of the outline at points this accepts are drawn. */
+    keepAt: ((x: number, y: number) => boolean) | null = null,
+  ): void {
+    this.arcFilter = keepAt;
+    this.uploadInstances(
+      (circles ?? []).map((c) => ({
+        x: c.x,
+        y: c.y,
+        radius: c.radius,
+        r: color[0],
+        g: color[1],
+        b: color[2],
+        alpha: 1.0,
+        group: 0,
+        spin: 0.0,
+      })),
+    );
+    this.visible = circles !== null;
+  }
+
+  /**
+   * openfront v2 map lenses: circles with their own colour; circles of the
+   * same group merge into one outline (e.g. all friendly SAMs). Null hides.
+   */
+  setLensCircles(
+    circles:
+      | readonly {
+          x: number;
+          y: number;
+          radius: number;
+          color: readonly [number, number, number];
+          group: number;
+          alpha?: number;
+        }[]
+      | null,
+  ): void {
+    this.arcFilter = null;
+    this.uploadInstances(
+      (circles ?? []).map((c) => ({
+        x: c.x,
+        y: c.y,
+        radius: c.radius,
+        r: c.color[0],
+        g: c.color[1],
+        b: c.color[2],
+        alpha: c.alpha ?? 1.0,
+        group: c.group,
+        spin: 0.5,
+      })),
+    );
+    this.visible = circles !== null;
   }
 
   /** Show/hide based on whether build mode is active. */

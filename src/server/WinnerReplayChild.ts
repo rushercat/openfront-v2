@@ -1,6 +1,9 @@
 // The winner-replay subprocess (see WinnerReplay.ts): receives one game's
 // start info and turns, replays them, sends back the result and exits.
-import { GameMapType } from "@openfront/engine-api/game/GameTypes";
+import {
+  CustomGameMap,
+  GameMapType,
+} from "@openfront/engine-api/game/GameTypes";
 import { MapManifest } from "@openfront/engine-api/game/MapFiles";
 import { replayWinner } from "@openfront/engine/WinnerReplay";
 import {
@@ -9,6 +12,7 @@ import {
   MapData,
 } from "@openfront/shared/GameMapLoader";
 import fs from "fs";
+import { loadCustomMapFiles } from "./CustomMaps";
 import { readMapFile } from "./MapFiles";
 import type { ReplayRequest, ReplayResponse } from "./WinnerReplay";
 
@@ -49,12 +53,12 @@ try {
 
 // The engine reads nothing itself: the map files are read here and passed in.
 async function replay(req: ReplayRequest) {
-  const { gameMap, gameMapSize } = req.gameStart.config;
-  const map = await loadMapFiles(
-    new ServerGameMapLoader(),
-    gameMap,
-    gameMapSize,
-  );
+  const { gameMap, gameMapSize, customMapId } = req.gameStart.config;
+  // An uploaded custom map's files are in the custom maps folder.
+  const map =
+    gameMap === CustomGameMap
+      ? await loadCustomMapFiles(customMapId ?? "", gameMapSize)
+      : await loadMapFiles(new ServerGameMapLoader(), gameMap, gameMapSize);
   return replayWinner(req.gameStart, req.turns, map);
 }
 

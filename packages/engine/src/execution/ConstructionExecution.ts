@@ -1,5 +1,9 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
-import { Tick, UnitType } from "@openfront/engine-api/game/GameTypes";
+import {
+  Structures,
+  Tick,
+  UnitType,
+} from "@openfront/engine-api/game/GameTypes";
 import {
   zInt,
   zPlayerRef,
@@ -14,14 +18,26 @@ import type {
   SnapshotReader,
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
+import { AADefenseExecution } from "./AADefenseExecution";
+import { AircraftCarrierExecution } from "./AircraftCarrierExecution";
+import { AircraftExecution } from "./AircraftExecution";
+import { AirfieldExecution } from "./AirfieldExecution";
+import { CapitalExecution } from "./CapitalExecution";
 import { CityExecution } from "./CityExecution";
+import { CruiseMissileExecution } from "./CruiseMissileExecution";
 import { DefensePostExecution } from "./DefensePostExecution";
 import { FactoryExecution } from "./FactoryExecution";
+import { MineExecution } from "./MineExecution";
 import { MirvExecution } from "./MIRVExecution";
 import { MissileSiloExecution } from "./MissileSiloExecution";
+import { NuclearSubmarineExecution } from "./NuclearSubmarineExecution";
 import { NukeExecution } from "./NukeExecution";
+import { ParadropExecution } from "./ParadropExecution";
 import { PortExecution } from "./PortExecution";
+import { RailDepotExecution } from "./RailDepotExecution";
+import { RepairStationExecution } from "./RepairStationExecution";
 import { SAMLauncherExecution } from "./SAMLauncherExecution";
+import { TankExecution } from "./TankExecution";
 import { WarshipExecution } from "./WarshipExecution";
 
 /**
@@ -43,6 +59,16 @@ export function structureExecution(structure: Unit): Execution {
       return new CityExecution(structure);
     case UnitType.Factory:
       return new FactoryExecution(structure);
+    case UnitType.AADefense:
+      return new AADefenseExecution(structure);
+    case UnitType.Airfield:
+      return new AirfieldExecution(structure);
+    case UnitType.RailDepot:
+      return new RailDepotExecution(structure);
+    case UnitType.RepairStation:
+      return new RepairStationExecution(structure);
+    case UnitType.Capital:
+      return new CapitalExecution(structure);
     default:
       throw new Error(`${structure.type()} is not a structure`);
   }
@@ -61,6 +87,8 @@ export class ConstructionExecution implements Execution {
     private tile: TileRef,
     private rocketDirectionUp?: boolean,
     private amount?: number,
+    /** Paratroopers aboard a transport plane; unset for the default share. */
+    private troops?: number,
   ) {}
 
   init(mg: Game, ticks: number): void {
@@ -168,12 +196,80 @@ export class ConstructionExecution implements Execution {
           new WarshipExecution({ owner: player, patrolTile: this.tile }),
         );
         break;
+      case UnitType.FighterJet:
+      case UnitType.Bomber: {
+        // Each AircraftExecution checks the airfield cap and pays for itself.
+        const count = this.amount ?? 1;
+        for (let i = 0; i < count; i++) {
+          this.mg.addExecution(
+            new AircraftExecution({
+              owner: player,
+              type: this.constructionType,
+              patrolTile: this.tile,
+            }),
+          );
+        }
+        break;
+      }
+      case UnitType.NuclearSubmarine:
+        this.mg.addExecution(
+          new NuclearSubmarineExecution({
+            owner: player,
+            patrolTile: this.tile,
+          }),
+        );
+        break;
+      case UnitType.Tank: {
+        // Each TankExecution checks the depot cap and pays for itself.
+        const count = this.amount ?? 1;
+        for (let i = 0; i < count; i++) {
+          this.mg.addExecution(
+            new TankExecution({ owner: player, patrolTile: this.tile }),
+          );
+        }
+        break;
+      }
+      case UnitType.AircraftCarrier:
+        this.mg.addExecution(
+          new AircraftCarrierExecution({
+            owner: player,
+            patrolTile: this.tile,
+          }),
+        );
+        break;
+      case UnitType.CruiseMissile: {
+        const count = this.amount ?? 1;
+        for (let i = 0; i < count; i++) {
+          this.mg.addExecution(new CruiseMissileExecution(player, this.tile));
+        }
+        break;
+      }
+      case UnitType.TransportPlane:
+        this.mg.addExecution(
+          new ParadropExecution(player, this.tile, this.troops ?? null),
+        );
+        break;
+      case UnitType.LandMine:
+      case UnitType.SeaMine:
+        this.mg.addExecution(
+          new MineExecution({
+            owner: player,
+            type: this.constructionType,
+            tile: this.tile,
+          }),
+        );
+        break;
       case UnitType.Port:
       case UnitType.MissileSilo:
       case UnitType.DefensePost:
       case UnitType.SAMLauncher:
       case UnitType.City:
       case UnitType.Factory:
+      case UnitType.AADefense:
+      case UnitType.Airfield:
+      case UnitType.RailDepot:
+      case UnitType.RepairStation:
+      case UnitType.Capital:
         this.mg.addExecution(structureExecution(this.structure!));
         break;
       default:
@@ -185,17 +281,7 @@ export class ConstructionExecution implements Execution {
   }
 
   private isStructure(type: UnitType): boolean {
-    switch (type) {
-      case UnitType.Port:
-      case UnitType.MissileSilo:
-      case UnitType.DefensePost:
-      case UnitType.SAMLauncher:
-      case UnitType.City:
-      case UnitType.Factory:
-        return true;
-      default:
-        return false;
-    }
+    return Structures.has(type);
   }
 
   isActive(): boolean {
@@ -215,6 +301,7 @@ export class ConstructionExecution implements Execution {
       tile: this.tile,
       rocketDirectionUp: this.rocketDirectionUp,
       amount: this.amount,
+      troops: this.troops,
       structure: w.unitOrNull(this.structure),
       ticksUntilComplete: this.ticksUntilComplete,
     });
@@ -228,6 +315,7 @@ export class ConstructionExecution implements Execution {
     this.tile = s.tile;
     this.rocketDirectionUp = s.rocketDirectionUp;
     this.amount = s.amount;
+    this.troops = s.troops;
     this.structure = r.unitOrNull(s.structure);
     this.ticksUntilComplete = s.ticksUntilComplete as Tick;
   }
@@ -242,6 +330,7 @@ const ConstructionStateSchema = z.object({
   tile: zInt(),
   rocketDirectionUp: z.boolean().optional(),
   amount: zInt().optional(),
+  troops: zInt().optional(),
   structure: zRef().nullable(),
   // Unset until a structure with a build time is placed.
   ticksUntilComplete: zInt().optional(),

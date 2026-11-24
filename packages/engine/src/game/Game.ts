@@ -18,6 +18,7 @@ import {
   PlayerType,
   Relation,
   SamLauncherState,
+  SubmarineState,
   SpawnArea,
   Team,
   TerraNullius,
@@ -33,6 +34,10 @@ import {
   PlayerUpdate,
   UnitUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
+import {
+  DecreeType,
+  PoliticsFactor,
+} from "@openfront/engine-api/game/Politics";
 import {
   GameLike,
   PlayerLike,
@@ -115,6 +120,53 @@ export interface UnitParamsMap {
   [UnitType.SAMLauncher]: Record<string, never>;
 
   [UnitType.City]: Record<string, never>;
+
+  [UnitType.AADefense]: Record<string, never>;
+
+  [UnitType.Airfield]: Record<string, never>;
+
+  // Aircraft patrol like warships, and keep their patrol tile in warshipState.
+  [UnitType.FighterJet]: {
+    patrolTile: TileRef;
+  };
+
+  [UnitType.Bomber]: {
+    patrolTile: TileRef;
+  };
+
+  [UnitType.NuclearSubmarine]: {
+    patrolTile: TileRef;
+  };
+
+  [UnitType.RailDepot]: Record<string, never>;
+
+  [UnitType.RepairStation]: Record<string, never>;
+
+  // Tanks are sent around like warships and keep their target in warshipState.
+  [UnitType.Tank]: {
+    patrolTile: TileRef;
+  };
+
+  [UnitType.LandMine]: Record<string, never>;
+
+  [UnitType.SeaMine]: Record<string, never>;
+
+  [UnitType.AircraftCarrier]: {
+    patrolTile: TileRef;
+  };
+
+  // Flies straight to its target; trajectory makes it SAM-targetable.
+  [UnitType.CruiseMissile]: {
+    targetTile: TileRef;
+    trajectory: TileRef[];
+  };
+
+  [UnitType.TransportPlane]: {
+    targetTile: TileRef;
+    troops: number;
+  };
+
+  [UnitType.Capital]: Record<string, never>;
 }
 
 // Type helper to get params type for a specific unit type
@@ -133,6 +185,60 @@ export interface Execution {
    * ExecutionSnapshotType in snapshot/ExecutionRegistry.ts.
    */
   snapshot(w: SnapshotWriter): ExecRecord;
+  /**
+   * Whether it keeps running while the world congress votes and the game is
+   * frozen (Politics). Executions without it wait; ones created meanwhile
+   * start once the vote is over.
+   */
+  activeDuringFreeze?(): boolean;
+}
+
+/**
+ * The world congress and the decrees in force (GameFeature.Politics,
+ * execution/PoliticsExecution). Rules elsewhere ask it what the decrees
+ * change.
+ */
+export interface Politics {
+  /** Whether the game is frozen for the vote during this (executed) tick. */
+  isFrozenAt(tick: Tick): boolean;
+  isDecreeActive(decree: DecreeType): boolean;
+  /** Multiplier on a player's income or troop growth. */
+  factor(player: Player, kind: PoliticsFactor): number;
+  /** Multiplier on the price of a unit type. */
+  costFactor(type: UnitType): number;
+  /** Whether a decree forbids the player to build or launch this. */
+  forbidsUnit(player: Player, type: UnitType): boolean;
+  /** Whether a decree forbids attacker to attack target (ceasefire, …). */
+  forbidsAttack(attacker: Player, target: Player): boolean;
+  /** Multiplier on the attacker's troop losses against this defender. */
+  attackLossFactor(attacker: Player, defender: Player | null): number;
+  /** Multiplier on how fast attacks take land. */
+  attackSpeedFactor(): number;
+  /** Geneva convention: land around the owner's cities that can't be taken. */
+  protectsTile(attacker: Player, tile: TileRef, range: number): boolean;
+  /** An attack took a tile of previousOwner (bounty). */
+  onConquer(attacker: Player, previousOwner: Player): void;
+  tradeBlocked(a: Player, b: Player): boolean;
+  allianceBlocked(a: Player, b: Player): boolean;
+  /** Naval ban: warships only fire at landings on their owner's land. */
+  navalDefenseOnly(): boolean;
+}
+
+/**
+ * The draft mode (GameConfig.draft, execution/DraftExecution): which units a
+ * player's deck unlocks and what its perks change. A freeze for the draft
+ * rounds works like the congress vote's.
+ */
+export interface Draft {
+  isFrozenAt(tick: Tick): boolean;
+  /** Whether the player's deck lets them build or launch this. */
+  allowsUnit(player: Player, type: UnitType): boolean;
+  /** Multiplier on the price of a unit type for this player. */
+  costFactor(player: Player, type: UnitType): number;
+  /** Multiplier on a player's income or troop growth. */
+  factor(player: Player, kind: PoliticsFactor): number;
+  /** Multiplier on the attacker's troop losses against this defender. */
+  attackLossFactor(attacker: Player, defender: Player | null): number;
 }
 
 export interface Attack {
@@ -259,7 +365,10 @@ export interface Unit extends UnitLike {
   updateNukeState(update: Partial<NukeState>): void;
 
   health(): number;
-  /** Effective max health, including any warship veterancy bonus. */
+  /**
+   * Effective max health: a warship's veterancy bonus included, and a
+   * structure's level (maxHealthAtLevel).
+   */
   maxHealth(): number;
   modifyHealth(delta: number, attacker?: Player): void;
 
@@ -283,6 +392,12 @@ export interface Unit extends UnitLike {
   isInCooldown(): boolean;
   missileTimerQueue(): number[];
   samLauncherState(): SamLauncherState | undefined;
+
+  // Nuclear submarines
+  submarineState(): SubmarineState | undefined;
+  updateSubmarineState(update: Partial<SubmarineState>): void;
+  /** A submerged submarine: no one but its owner sees or targets it. */
+  isSubmerged(): boolean;
 
   // Trade Ships
   setSafeFromPirates(): void; // Only for trade ships
@@ -362,6 +477,20 @@ export interface Player extends PlayerLike {
   hasSpawned(): boolean;
   setSpawnTile(spawnTile: TileRef): void;
   spawnTile(): TileRef | undefined;
+  /** openfront v2: recently conquered tiles, decaying (UnrestExecution). */
+  unrest(): number;
+  setUnrest(unrest: number): void;
+  /** Unrest as a share of the player's land, 0 to 1. */
+  unrestShare(): number;
+  /** What the decrees in force do to this player's income/troop growth. */
+  politicsFactor(kind: PoliticsFactor): number;
+  /** Tick until which the player can't have a capital after losing one (-1 = never lost). */
+  capitalLostUntil(): number;
+  setCapitalLostUntil(tick: number): void;
+  /** The player's finished capital, if it has one. */
+  capital(): Unit | null;
+  /** Finished airfields and aircraft carriers: where planes take off. */
+  airBases(): Unit[];
 
   // Territory
   tiles(): ReadonlyTileSet;
@@ -589,6 +718,14 @@ export interface Game extends GameLike {
   config(): EngineConfig;
   isPaused(): boolean;
   setPaused(paused: boolean): void;
+  /** The world congress, or null when politics is switched off. */
+  politics(): Politics | null;
+  setPolitics(politics: Politics | null): void;
+  /** The draft, or null when the draft mode is off. */
+  draft(): Draft | null;
+  setDraft(draft: Draft | null): void;
+  /** Whether the current tick is frozen for a congress vote. */
+  isFrozen(): boolean;
 
   // Units
   unit(id: number): Unit | undefined;
@@ -620,6 +757,14 @@ export interface Game extends GameLike {
     predicate?: UnitPredicate,
     includeUnderConstruction?: boolean,
   ): Array<{ unit: Unit; distSquared: number }>;
+  /** nearbyUnits() as a visit, in the same order, without the result array. */
+  forEachNearbyUnit(
+    tile: TileRef,
+    searchRange: number,
+    types: readonly UnitType[],
+    visit: (unit: Unit, distSquared: number) => void,
+    includeUnderConstruction?: boolean,
+  ): void;
 
   addExecution(...exec: Execution[]): void;
   executions(): Execution[];

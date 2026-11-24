@@ -104,6 +104,11 @@ function dispatchTouch(target: EventTarget, type: string, identifier: number) {
   target.dispatchEvent(event);
 }
 
+/** Units in the bar's first row (the rest show while Shift is held). */
+const FIRST_ROW = 10;
+/** The third row (Alt): carrier, cruise missile, transport plane, capital. */
+const THIRD_ROW = 4;
+
 describe("mobile UnitDisplay layout", () => {
   test("is a row, and a vertically scrolling column below lg in portrait", async () => {
     const { display } = makeDisplay();
@@ -126,7 +131,8 @@ describe("mobile UnitDisplay layout", () => {
       expect(grid?.classList.contains("lg:auto-cols-max")).toBe(true);
       expect(grid?.classList.contains("side-bar:grid-flow-row")).toBe(true);
       expect(grid?.classList.contains("side-bar:grid-cols-1")).toBe(true);
-      expect(grid?.children).toHaveLength(10);
+      // The first row's units and the toggle to the second row.
+      expect(grid?.children).toHaveLength(FIRST_ROW + 1);
     } finally {
       display.remove();
     }
@@ -138,7 +144,40 @@ describe("mobile UnitDisplay layout", () => {
       await display.updateComplete;
 
       const grid = display.querySelector<HTMLElement>(".unit-display-grid");
-      expect(grid?.children).toHaveLength(BuildMenus.types.length - 1);
+      expect(grid?.children).toHaveLength(FIRST_ROW - 1 + 1);
+    } finally {
+      display.remove();
+    }
+  });
+
+  test("holding Shift, or the toggle, shows the second row", async () => {
+    const { display } = makeDisplay();
+    try {
+      await display.updateComplete;
+      const grid = () =>
+        display.querySelector<HTMLElement>(".unit-display-grid");
+      const hasUnit = (key: string) =>
+        grid()?.querySelector(`img[alt="${key}"]`) !== null;
+      expect(hasUnit("unit_type.city")).toBe(true);
+      expect(hasUnit("unit_type.tank")).toBe(false);
+
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Shift", shiftKey: true }),
+      );
+      await display.updateComplete;
+      expect(grid()?.children).toHaveLength(
+        BuildMenus.types.length - FIRST_ROW - THIRD_ROW + 1,
+      );
+      expect(hasUnit("unit_type.tank")).toBe(true);
+      expect(hasUnit("unit_type.city")).toBe(false);
+
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift" }));
+      await display.updateComplete;
+      expect(hasUnit("unit_type.city")).toBe(true);
+
+      grid()?.querySelector<HTMLButtonElement>("button")?.click();
+      await display.updateComplete;
+      expect(hasUnit("unit_type.sea_mine")).toBe(true);
     } finally {
       display.remove();
     }

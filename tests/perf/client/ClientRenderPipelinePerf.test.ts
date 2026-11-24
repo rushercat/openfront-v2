@@ -784,6 +784,7 @@ function createDummyUnitState(
     samUpgradeStartRange: null,
     samUpgradeTargetLevel: null,
     samUpgradeDuration: null,
+    submerged: false,
   };
 }
 

@@ -48,6 +48,22 @@ export type SamLauncherState = {
   duration: number;
 };
 
+/**
+ * A nuclear submarine is invisible to everyone but its owner while
+ * submerged. Surfacing takes a while (surfacing, readyTick in the future);
+ * once surfaced it may launch nukes until its payload is spent or its fire
+ * window closes, then it dives again.
+ */
+export type SubmarineMode = "submerged" | "surfacing" | "surfaced";
+
+export type SubmarineState = {
+  mode: SubmarineMode;
+  /** Tick the surfacing submarine can fire; meaningless while submerged. */
+  readyTick: number;
+  /** Payload points left this surfacing (see Config.nukePayloadCost). */
+  payloadLeft: number;
+};
+
 export const AllPlayers = "AllPlayers" as const;
 
 // export type GameUpdates = Record<GameUpdateType, GameUpdate[]>;
@@ -128,6 +144,21 @@ export {
  * files other than the ones it was taken on.
  */
 export const CustomGameMap = "Custom" as const;
+
+/**
+ * Historical scenarios (openfront v2): a stock map with nations at their
+ * historical positions, starting borders and fixed alliances. Their data is
+ * in engine-lib/game/HistoricalScenarios.ts.
+ */
+export enum HistoricalScenarioId {
+  Europe1939 = "europe1939",
+  MareNostrum218 = "marenostrum218",
+  Sengoku1560 = "sengoku1560",
+  Italy1494 = "italy1494",
+  Britannia800 = "britannia800",
+  Africa1884 = "africa1884",
+  ColdWar1962 = "coldwar1962",
+}
 
 /** A game's map: a stock map, or `CustomGameMap`. */
 export type GameMapId = GameMapType | typeof CustomGameMap;
@@ -220,6 +251,44 @@ export enum UnitType {
   MIRVWarhead = "MIRV Warhead",
   Train = "Train",
   Factory = "Factory",
+  // Air warfare. An AA Defense shoots SAMMissile units at aircraft; aircraft
+  // are built at an Airfield and fire Shell units (guns and bombs).
+  AADefense = "AA Defense",
+  Airfield = "Airfield",
+  FighterJet = "Fighter Jet",
+  Bomber = "Bomber",
+  // A submarine that hides under water and surfaces to launch nukes.
+  NuclearSubmarine = "Nuclear Submarine",
+  // Tanks are built at a Rail Depot and ride its railway network.
+  RailDepot = "Rail Depot",
+  Tank = "Tank",
+  LandMine = "Land Mine",
+  SeaMine = "Sea Mine",
+  // Mends damaged structures around it; nothing else repairs them.
+  RepairStation = "Repair Station",
+  // A mobile airfield at sea with its own AA guns and a small SAM.
+  AircraftCarrier = "Aircraft Carrier",
+  // A conventional missile from a silo that wears down structures.
+  CruiseMissile = "Cruise Missile",
+  // Carries paratroopers from an airfield or carrier behind the front.
+  TransportPlane = "Transport Plane",
+  // Every player's seat of government, placed near the spawn and movable.
+  Capital = "Capital",
+}
+
+/**
+ * Game mechanics a lobby can switch off (GameConfig.disabledFeatures), like
+ * units through disabledUnits.
+ */
+export enum GameFeature {
+  /** A capital near the spawn that boosts troops and gold. */
+  Capital = "capital",
+  /** Freshly conquered land yields less for a while. */
+  Unrest = "unrest",
+  /** Extreme unrest makes outlying land break away as a new nation. */
+  Secession = "secession",
+  /** The world congress: players propose and vote on decrees (Politics). */
+  Politics = "politics",
 }
 
 export enum TrainType {
@@ -240,6 +309,13 @@ export const BuildableAttacks = unitTypeGroup([
   UnitType.HydrogenBomb,
   UnitType.MIRV,
   UnitType.Warship,
+  UnitType.FighterJet,
+  UnitType.Bomber,
+  UnitType.NuclearSubmarine,
+  UnitType.Tank,
+  UnitType.AircraftCarrier,
+  UnitType.CruiseMissile,
+  UnitType.TransportPlane,
 ] as const);
 
 export const Structures = unitTypeGroup([
@@ -249,11 +325,59 @@ export const Structures = unitTypeGroup([
   UnitType.MissileSilo,
   UnitType.Port,
   UnitType.Factory,
+  UnitType.AADefense,
+  UnitType.Airfield,
+  UnitType.RailDepot,
+  UnitType.RepairStation,
+  UnitType.Capital,
+] as const);
+
+/**
+ * Mines: placed like structures but hidden from other players, never
+ * upgraded and gone once they go off.
+ */
+export const Mines = unitTypeGroup([
+  UnitType.LandMine,
+  UnitType.SeaMine,
+] as const);
+
+/** Ships a sea mine goes off under (and sinks). */
+export const MineableShips = unitTypeGroup([
+  UnitType.TransportShip,
+  UnitType.TradeShip,
+  UnitType.Warship,
+  UnitType.NuclearSubmarine,
+  UnitType.AircraftCarrier,
+] as const);
+
+/** Planes: built at an Airfield, patrol like warships, shot by AA Defenses. */
+export const Aircraft = unitTypeGroup([
+  UnitType.FighterJet,
+  UnitType.Bomber,
+] as const);
+
+/**
+ * Units a player selects on the map and sends somewhere (move_warship
+ * intent): they patrol around the tile they were sent to.
+ */
+export const PatrolUnits = unitTypeGroup([
+  UnitType.Warship,
+  ...Aircraft.types,
+  UnitType.NuclearSubmarine,
+  UnitType.Tank,
+  UnitType.AircraftCarrier,
+] as const);
+
+/** What AA guns (AA Defenses, carriers) shoot at: aircraft and transport planes. */
+export const AirTargets = unitTypeGroup([
+  ...Aircraft.types,
+  UnitType.TransportPlane,
 ] as const);
 
 export const BuildMenus = unitTypeGroup([
   ...Structures.types,
   ...BuildableAttacks.types,
+  ...Mines.types,
 ] as const);
 
 export const PlayerBuildable = unitTypeGroup([

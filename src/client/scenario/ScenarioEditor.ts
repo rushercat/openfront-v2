@@ -16,6 +16,7 @@ import type { MapFiles } from "@openfront/engine-api/game/MapFiles";
 import { maps } from "@openfront/engine-api/game/Maps.gen";
 import { Config } from "@openfront/engine-lib/configuration/Config";
 import { loadTerrainMap } from "@openfront/engine-lib/game/TerrainMapLoader";
+import type { CustomMapInfo } from "@openfront/shared/CustomMaps";
 import { EventBus } from "@openfront/shared/EventBus";
 import { loadMapFiles } from "@openfront/shared/GameMapLoader";
 import { generateID } from "@openfront/shared/SharedUtil";
@@ -23,8 +24,18 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import { live } from "lit/directives/live.js";
 import Countries from "resources/countries.json" with { type: "json" };
-import { ClientEnv } from "../ClientEnv";
 import "../hud/layers/PlayerInfoOverlay";
+import { ClientEnv } from "../ClientEnv";
+import {
+  customMapOfDraft,
+  deleteCustomMap,
+  downloadCustomMapDocument,
+  linkCustomMapToDraft,
+  listCustomMaps,
+  ownsCustomMap,
+  updateCustomMap,
+  uploadCustomMap,
+} from "../CustomMapsApi";
 import type { PlayerInfoOverlay } from "../hud/layers/PlayerInfoOverlay";
 import { showInGameAlert } from "../InGameModal";
 import { MouseMoveEvent } from "../InputHandler";
@@ -51,12 +62,26 @@ import { homeHref, returnFromGameTo, translateText } from "../Utils";
 import { GameView } from "../view/GameView";
 import { WebGLFrameBuilder } from "../WebGLFrameBuilder";
 import { WorkerClient } from "../WorkerClient";
+import { buildCustomMapUpload } from "./CustomMapUpload";
 import { DocumentEditor, type Edit } from "./DocumentEditor";
 import {
   editorStartInfo,
   startEditorEngine,
   stockMapStart,
 } from "./EditorEngine";
+import {
+  fitMapSize,
+  type ImageImportMode,
+  imageSize,
+  terrainFromImage,
+} from "./ImageImport";
+import {
+  MapSession,
+  MapSessionError,
+  type MapSessionCursor,
+  type MapSessionEvents,
+  type MapSessionParticipant,
+} from "./MapSession";
 import {
   IMPASSABLE,
   isScenarioSize,
@@ -68,6 +93,7 @@ import {
   newScenarioDocument,
   resizeScenarioDocument,
   type ScenarioDocument,
+  ScenarioDocumentSchema,
   type ScenarioNation,
   WATER,
 } from "./ScenarioDocument";
@@ -77,9 +103,34 @@ import { exportScenario } from "./ScenarioExport";
 import { scenarioGameStart } from "./ScenarioStart";
 import {
   type BrushStroke,
+  SlopeStroke,
   TerrainStroke,
   TerritoryStroke,
 } from "./TerrainBrush";
+
+/** openfront v2: the slope option of the land brush, kept per browser. */
+const SLOPE_STORAGE_KEY = "openfront.editor.slopes.v1";
+const MAX_SLOPE_WIDTH = 40;
+
+function loadSlopeSettings(): { on: boolean; width: number } {
+  try {
+    const raw = localStorage.getItem(SLOPE_STORAGE_KEY);
+    if (raw) {
+      const v = JSON.parse(raw) as { on?: unknown; width?: unknown };
+      const width = Number(v.width);
+      return {
+        on: v.on === true,
+        width:
+          Number.isInteger(width) && width >= 1 && width <= MAX_SLOPE_WIDTH
+            ? width
+            : 6,
+      };
+    }
+  } catch {
+    // Storage unavailable: defaults.
+  }
+  return { on: false, width: 6 };
+}
 
 const WHEEL_ZOOM = 1.0015;
 const MAX_BRUSH_RADIUS = 50;
@@ -129,6 +180,9 @@ export class ScenarioEditor extends LitElement {
   @state() private tool: Tool = "pan";
   @state() private terrainKind: TerrainKind = "land";
   @state() private elevation = 0;
+  /** Land brush: add slopes around what it paints (SlopeStroke). */
+  @state() private autoSlope = loadSlopeSettings().on;
+  @state() private slopeWidth = loadSlopeSettings().width;
   /** In tiles; 0 paints one tile. */
   @state() private brushRadius = 2;
   /**
@@ -140,8 +194,25 @@ export class ScenarioEditor extends LitElement {
   @state() private playMenu = false;
   /** A test game is being exported and started. */
   @state() private starting = false;
+  // openfront v2: image import and custom map uploads.
+  @state() private importFile: File | null = null;
+  @state() private importMode: ImageImportMode = "picture";
+  @state() private uploading = false;
+  /** The maps this browser uploaded (and may edit), on the start screen. */
+  @state() private ownedMaps: CustomMapInfo[] = [];
+  // Building together (MapSession): the shared session, who is in it, and
+  // the code typed on the start screen.
+  @state() private shared: MapSession | null = null;
+  @state() private sharedParticipants: MapSessionParticipant[] = [];
+  @state() private sharing = false;
+  @state() private joinCode = "";
+  private sharedSaveTimer: number | null = null;
+  /** Where the others point; the frame loop draws them (placeRemoteCursors). */
+  private remoteCursors: MapSessionCursor[] = [];
+  private remoteCursorEls = new Map<string, HTMLElement>();
 
   @query("#scenario-editor-brush") private brushPreview!: HTMLElement | null;
+  @query("#scenario-editor-cursors") private cursorLayer!: HTMLElement | null;
 
   private editor: DocumentEditor | null = null;
   private session: Session | null = null;
@@ -180,12 +251,14 @@ export class ScenarioEditor extends LitElement {
       void this.openDraft(this.draftId);
     } else {
       void this.listDrafts();
+      void this.listOwnedMaps();
     }
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.abort.abort();
+    this.leaveShared();
     this.endSession();
   }
 
@@ -195,6 +268,242 @@ export class ScenarioEditor extends LitElement {
     } catch (e) {
       console.error("scenario editor: listing drafts failed:", e);
     }
+  }
+
+  private async listOwnedMaps(): Promise<void> {
+    try {
+      this.ownedMaps = (await listCustomMaps()).filter((m) =>
+        ownsCustomMap(m.id),
+      );
+    } catch (e) {
+      console.warn("map editor: listing the uploaded maps failed:", e);
+    }
+  }
+
+  // ---- Image import ----
+
+  private async pickImage(file: File | null): Promise<void> {
+    this.importFile = file;
+    if (file === null) return;
+    try {
+      const size = await imageSize(file);
+      const fitted = fitMapSize(size.width, size.height);
+      this.width = fitted.width;
+      this.height = fitted.height;
+      if (this.name.trim() === "") {
+        this.name = file.name.replace(/\.[^.]+$/, "").slice(0, 64);
+      }
+    } catch (e) {
+      console.error("map editor: reading the image failed:", e);
+      this.importFile = null;
+      void showInGameAlert(translateText("map_editor.image_failed"));
+    }
+  }
+
+  /** A new map whose terrain is the picked image, scaled to the size set. */
+  private async createFromImage(): Promise<void> {
+    const file = this.importFile;
+    if (file === null || !isScenarioSize(this.width, this.height)) return;
+    const { width, height } = this;
+    const mode = this.importMode;
+    await this.create(async () => {
+      const doc = newScenarioDocument(this.draftName(), width, height);
+      doc.terrain.set(await terrainFromImage(file, width, height, mode));
+      return { doc };
+    });
+  }
+
+  // ---- Custom maps (upload, edit, delete) ----
+
+  /**
+   * Uploads the map so everyone can play it in private matches, or, if
+   * this draft was uploaded before, replaces that map with this version.
+   */
+  private async uploadMap(): Promise<void> {
+    const editor = this.editor;
+    const worker = this.session?.worker ?? null;
+    const draftId = this.draftId;
+    if (editor === null || worker === null || draftId === null) return;
+    if (this.status !== "ready" || this.starting || this.uploading) return;
+    this.endStroke();
+    this.uploading = true;
+    try {
+      const doc = structuredClone(editor.doc);
+      const files = await worker.editorCommand({ type: "export_terrain" });
+      if (files === undefined) throw new Error("no terrain was exported");
+      const usernameInput = document.querySelector(
+        "username-input",
+      ) as UsernameInput | null;
+      const author = usernameInput?.resolvedName()?.name ?? "";
+      const { upload, skipped } = await buildCustomMapUpload(
+        doc,
+        files,
+        author,
+      );
+      const existing = customMapOfDraft(draftId);
+      const info =
+        existing !== null && ownsCustomMap(existing)
+          ? await updateCustomMap(existing, upload)
+          : await uploadCustomMap(upload, draftId);
+      const message = translateText(
+        existing !== null ? "map_editor.updated" : "map_editor.uploaded",
+        { name: info.name, version: info.version },
+      );
+      void showInGameAlert(
+        skipped.length > 0
+          ? `${message}\n${translateText("map_editor.nations_skipped", {
+              nations: skipped.join(", "),
+            })}`
+          : message,
+      );
+    } catch (e) {
+      console.error("map editor: upload failed:", e);
+      void showInGameAlert(
+        translateText("map_editor.upload_failed", {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    } finally {
+      this.uploading = false;
+    }
+  }
+
+  /** Opens a map this browser uploaded in the editor, as a new draft. */
+  private async editOwnedMap(map: CustomMapInfo): Promise<void> {
+    await this.create(async () => {
+      const doc = ScenarioDocumentSchema.parse(
+        await downloadCustomMapDocument(map.id),
+      );
+      return { doc };
+    });
+    if (this.draftId !== null) linkCustomMapToDraft(map.id, this.draftId);
+  }
+
+  private async deleteOwnedMap(map: CustomMapInfo): Promise<void> {
+    if (
+      !confirm(translateText("map_editor.delete_confirm", { name: map.name }))
+    )
+      return;
+    try {
+      await deleteCustomMap(map.id);
+      this.ownedMaps = this.ownedMaps.filter((m) => m.id !== map.id);
+    } catch (e) {
+      console.error("map editor: deleting the map failed:", e);
+      void showInGameAlert(translateText("map_editor.delete_failed"));
+    }
+  }
+
+  // ---- Building together ----
+
+  private sharedEvents(): MapSessionEvents {
+    return {
+      changed: () => {
+        this.requestUpdate();
+        // Saved a moment after the edits stop, not on every one.
+        if (this.sharedSaveTimer !== null) clearTimeout(this.sharedSaveTimer);
+        this.sharedSaveTimer = window.setTimeout(() => {
+          this.sharedSaveTimer = null;
+          this.saveDraft();
+        }, 2000);
+      },
+      participants: (list) => (this.sharedParticipants = list),
+      cursors: (list) => (this.remoteCursors = list),
+      ended: (reasonKey) => {
+        this.shared = null;
+        this.sharedParticipants = [];
+        this.remoteCursors = [];
+        this.saveDraft();
+        void showInGameAlert(translateText(reasonKey));
+      },
+    };
+  }
+
+  private playerName(): string {
+    const usernameInput = document.querySelector(
+      "username-input",
+    ) as UsernameInput | null;
+    return (
+      usernameInput?.resolvedName()?.name ?? fallbackPlayerName().name
+    ).slice(0, 40);
+  }
+
+  /** Opens a session for this map and shows its code to invite others. */
+  private async startSharing(): Promise<void> {
+    const editor = this.editor;
+    if (editor === null || this.shared !== null || this.sharing) return;
+    if (this.status !== "ready" || this.starting) return;
+    this.endStroke();
+    this.sharing = true;
+    try {
+      const session = await MapSession.open(
+        editor.doc,
+        this.playerName(),
+        this.sharedEvents(),
+      );
+      // Edits made while it opened stay local: the session has the
+      // document from before them, so start over from the editor's copy.
+      if (this.editor !== editor || this.abort.signal.aborted) {
+        session.leave();
+        return;
+      }
+      session.attach(editor);
+      this.shared = session;
+    } catch (e) {
+      console.error("map editor: opening a shared session failed:", e);
+      void showInGameAlert(translateText("map_session.open_failed"));
+    } finally {
+      this.sharing = false;
+    }
+  }
+
+  /** Joins someone else's map by its code, as a new draft of one's own. */
+  private async joinShared(): Promise<void> {
+    const code = this.joinCode.trim();
+    if (!/^[0-9]{4}$/.test(code) || this.sharing) return;
+    this.sharing = true;
+    this.status = "loading";
+    try {
+      const { session, doc, pending } = await MapSession.join(
+        code,
+        this.playerName(),
+        this.sharedEvents(),
+      );
+      const id = generateID();
+      await scenarioDrafts.save(id, doc);
+      if (this.abort.signal.aborted) {
+        session.leave();
+        return;
+      }
+      this.setDraft(id);
+      await this.startSession(doc);
+      if (this.editor === null) {
+        session.leave();
+        return;
+      }
+      session.attach(this.editor, pending);
+      this.shared = session;
+    } catch (e) {
+      console.error("map editor: joining failed:", e);
+      this.status = "start";
+      void showInGameAlert(
+        translateText(
+          e instanceof MapSessionError && e.status === 404
+            ? "map_session.not_found"
+            : e instanceof MapSessionError && e.status === 409
+              ? "map_session.full"
+              : "map_session.join_failed",
+        ),
+      );
+    } finally {
+      this.sharing = false;
+    }
+  }
+
+  private leaveShared(): void {
+    this.shared?.leave();
+    this.shared = null;
+    this.sharedParticipants = [];
+    this.remoteCursors = [];
   }
 
   private async openDraft(id: string): Promise<void> {
@@ -290,6 +599,8 @@ export class ScenarioEditor extends LitElement {
     // A test play starting exports from the current session; replacing it
     // would leave that export waiting on a terminated worker.
     if (doc === null || id === null || this.starting) return;
+    // Everyone in a shared session works on the same size.
+    if (this.shared !== null) return;
     if (!isScenarioSize(this.width, this.height)) return;
     if (this.width === doc.width && this.height === doc.height) return;
     // A stroke still open goes into the resized document.
@@ -633,6 +944,7 @@ export class ScenarioEditor extends LitElement {
       // At most one terrain edit a frame, however often the pointer moves.
       if (this.stroke?.confirmed) this.stroke.brush.flush();
       this.placeBrushPreview(canvas);
+      this.placeRemoteCursors(canvas);
     };
     session.rafId = requestAnimationFrame(loop);
     return builder;
@@ -666,6 +978,8 @@ export class ScenarioEditor extends LitElement {
     // A stroke still open is dropped with the editor it paints through.
     this.stroke = null;
     this.camera = null;
+    for (const el of this.remoteCursorEls.values()) el.remove();
+    this.remoteCursorEls.clear();
     this.gestures = null;
     // The overlay listens on the bus; a new one leaves the old listeners.
     this.hudBus = new EventBus();
@@ -720,13 +1034,20 @@ export class ScenarioEditor extends LitElement {
           ? land(this.elevation)
           : IMPASSABLE;
     const brush =
-      this.tool === "terrain"
-        ? new TerrainStroke(editor, terrain, this.brushRadius)
-        : new TerritoryStroke(
+      this.tool === "terrain" && this.slopeActive()
+        ? new SlopeStroke(
             editor,
-            this.selectedNation()?.id ?? null,
+            this.elevation,
             this.brushRadius,
-          );
+            this.slopeWidth,
+          )
+        : this.tool === "terrain"
+          ? new TerrainStroke(editor, terrain, this.brushRadius)
+          : new TerritoryStroke(
+              editor,
+              this.selectedNation()?.id ?? null,
+              this.brushRadius,
+            );
     this.stroke = {
       pointerId,
       brush,
@@ -763,6 +1084,7 @@ export class ScenarioEditor extends LitElement {
   private onPointerMove(e: PointerEvent): void {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     this.hover = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    this.sendCursor(rect);
     const stroke = this.stroke;
     if (stroke?.pointerId === e.pointerId) {
       if ((e.buttons & 1) !== 0) {
@@ -811,6 +1133,110 @@ export class ScenarioEditor extends LitElement {
     this.brushRadius = Math.max(0, Math.min(MAX_BRUSH_RADIUS, radius));
   }
 
+  /** Tells the others in a shared session where the pointer is. */
+  private sendCursor(rect: DOMRect): void {
+    const shared = this.shared;
+    const camera = this.camera;
+    const doc = this.doc;
+    const hover = this.hover;
+    if (shared === null) return;
+    if (camera === null || doc === null || hover === null) {
+      shared.sendCursor(null);
+      return;
+    }
+    const world = camera.worldAt(hover.x, hover.y, rect.width, rect.height);
+    const x = Math.floor(world.x);
+    const y = Math.floor(world.y);
+    if (x < 0 || y < 0 || x >= doc.width || y >= doc.height) {
+      shared.sendCursor(null);
+      return;
+    }
+    // r = -1: a plain pointer (the pan tool), no brush to outline.
+    const r =
+      this.tool === "pan"
+        ? -1
+        : (this.stroke?.brush.radius ?? this.brushRadius);
+    shared.sendCursor({ x, y, r });
+  }
+
+  /**
+   * Draws the other participants' pointers: a dot with their name in their
+   * colour and, with a brush out, the outline of the tiles it covers.
+   */
+  private placeRemoteCursors(canvas: HTMLCanvasElement): void {
+    const layer = this.cursorLayer;
+    const camera = this.camera;
+    if (layer === null || camera === null) return;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    const seen = new Set<string>();
+    for (const c of this.remoteCursors) {
+      const who = this.sharedParticipants.find(
+        (p) => p.clientId === c.clientId,
+      );
+      if (who === undefined) continue;
+      seen.add(c.clientId);
+      let el = this.remoteCursorEls.get(c.clientId);
+      if (el === undefined) {
+        el = document.createElement("div");
+        el.className = "absolute left-0 top-0";
+        const ring = document.createElement("div");
+        ring.className =
+          "absolute rounded-full border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.5)]";
+        const dot = document.createElement("div");
+        dot.className =
+          "absolute -left-1.5 -top-1.5 h-3 w-3 rounded-full border border-black/60";
+        const label = document.createElement("div");
+        label.className =
+          "absolute left-2.5 top-2 whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-semibold text-black shadow";
+        el.append(ring, dot, label);
+        layer.append(el);
+        this.remoteCursorEls.set(c.clientId, el);
+      }
+      const [ring, dot, label] = el.children as unknown as HTMLElement[];
+      ring.style.borderColor = who.color;
+      dot.style.background = who.color;
+      label.style.background = who.color;
+      if (label.textContent !== who.name) label.textContent = who.name;
+      // The tile's centre on screen, as placeBrushPreview does it.
+      const cx = (c.x + 0.5 - camera.x) * camera.zoom + w / 2;
+      const cy = (c.y + 0.5 - camera.y) * camera.zoom + h / 2;
+      el.style.transform = `translate(${cx}px, ${cy}px)`;
+      if (c.r >= 0) {
+        const size = (2 * c.r + 1) * camera.zoom;
+        ring.style.display = "block";
+        ring.style.left = `${-size / 2}px`;
+        ring.style.top = `${-size / 2}px`;
+        ring.style.width = `${size}px`;
+        ring.style.height = `${size}px`;
+      } else {
+        ring.style.display = "none";
+      }
+    }
+    for (const [id, el] of this.remoteCursorEls) {
+      if (!seen.has(id)) {
+        el.remove();
+        this.remoteCursorEls.delete(id);
+      }
+    }
+  }
+
+  /** Whether the next terrain stroke paints land with slopes. */
+  private slopeActive(): boolean {
+    return this.autoSlope && this.terrainKind === "land" && this.elevation > 0;
+  }
+
+  private saveSlopeSettings(): void {
+    try {
+      localStorage.setItem(
+        SLOPE_STORAGE_KEY,
+        JSON.stringify({ on: this.autoSlope, width: this.slopeWidth }),
+      );
+    } catch {
+      // Not fatal: the setting just doesn't stick.
+    }
+  }
+
   /** Outlines the tiles the brush would paint under the pointer. */
   private placeBrushPreview(canvas: HTMLCanvasElement): void {
     const el = this.brushPreview;
@@ -835,6 +1261,16 @@ export class ScenarioEditor extends LitElement {
     el.style.top = `${cy - size / 2}px`;
     el.style.width = `${size}px`;
     el.style.height = `${size}px`;
+    // How far the slopes reach: a dashed ring outside the brush.
+    const stroke = this.stroke?.brush;
+    const slope =
+      stroke instanceof SlopeStroke
+        ? stroke.slopeWidth
+        : this.stroke === null && this.tool === "terrain" && this.slopeActive()
+          ? this.slopeWidth
+          : 0;
+    el.style.outline = slope > 0 ? "1px dashed rgba(255,255,255,0.6)" : "";
+    el.style.outlineOffset = slope > 0 ? `${slope * camera.zoom}px` : "";
   }
 
   private onWheel(e: WheelEvent): void {
@@ -873,7 +1309,10 @@ export class ScenarioEditor extends LitElement {
           @pointermove=${this.onPointerMove}
           @pointerup=${this.onPointerUp}
           @pointercancel=${this.onPointerCancel}
-          @pointerleave=${() => (this.hover = null)}
+          @pointerleave=${() => {
+            this.hover = null;
+            this.shared?.sendCursor(null);
+          }}
           @wheel=${this.onWheel}
           @dblclick=${this.onDoubleClick}
           @contextmenu=${(e: Event) => {
@@ -884,6 +1323,11 @@ export class ScenarioEditor extends LitElement {
         ${
           this.status === "ready"
             ? html`
+                <!-- The others' pointers (placeRemoteCursors). -->
+                <div
+                  id="scenario-editor-cursors"
+                  class="pointer-events-none absolute inset-0 overflow-hidden"
+                ></div>
                 <!-- The frame loop places it (placeBrushPreview). -->
                 <div
                   id="scenario-editor-brush"
@@ -1010,6 +1454,72 @@ export class ScenarioEditor extends LitElement {
             `
           : nothing
       }
+      <div class="mb-4 flex flex-col gap-2 rounded bg-zinc-800/60 p-3">
+        <span class="font-semibold"
+          >${translateText("map_session.join_title")}</span
+        >
+        <span class="text-sm text-zinc-400">
+          ${translateText("map_session.join_hint")}
+        </span>
+        <div class="flex gap-2">
+          <input
+            class="w-28 rounded bg-zinc-800 px-2 py-1 text-center font-mono text-lg tracking-widest text-white"
+            inputmode="numeric"
+            maxlength="4"
+            placeholder="0000"
+            .value=${this.joinCode}
+            @input=${(e: Event) =>
+              (this.joinCode = (e.target as HTMLInputElement).value
+                .replace(/[^0-9]/g, "")
+                .slice(0, 4))}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === "Enter") void this.joinShared();
+            }}
+          />
+          <button
+            class=${button}
+            ?disabled=${this.joinCode.length !== 4 || this.sharing}
+            @click=${() => void this.joinShared()}
+          >
+            ${translateText("map_session.join")}
+          </button>
+        </div>
+      </div>
+      ${
+        this.ownedMaps.length > 0
+          ? html`
+              <h2 class="mb-2 font-semibold">
+                ${translateText("map_editor.my_maps")}
+              </h2>
+              <ul class="mb-4 flex flex-col gap-1">
+                ${this.ownedMaps.map(
+                  (m) => html`
+                    <li class="flex items-center gap-2">
+                      <span class="flex-1 truncate">
+                        ${m.name}
+                        <span class="text-sm text-zinc-400">
+                          v${m.version} · ${m.width}×${m.height}
+                        </span>
+                      </span>
+                      <button
+                        class="rounded bg-zinc-700 px-2 py-1 hover:bg-zinc-600"
+                        @click=${() => void this.editOwnedMap(m)}
+                      >
+                        ${translateText("map_editor.edit")}
+                      </button>
+                      <button
+                        class="rounded bg-red-700 px-2 py-1 hover:bg-red-600"
+                        @click=${() => void this.deleteOwnedMap(m)}
+                      >
+                        ${translateText("map_editor.delete")}
+                      </button>
+                    </li>
+                  `,
+                )}
+              </ul>
+            `
+          : nothing
+      }
       <h2 class="mb-2 font-semibold">
         ${translateText("scenario_editor.new_scenario")}
       </h2>
@@ -1031,6 +1541,54 @@ export class ScenarioEditor extends LitElement {
           @click=${() => void this.createBlank()}
         >
           ${translateText("scenario_editor.create_blank")}
+        </button>
+      </div>
+      <div class="mt-4 flex flex-col gap-2 rounded bg-zinc-800/60 p-3">
+        <span class="font-semibold">
+          ${translateText("map_editor.from_image")}
+        </span>
+        <span class="text-sm text-zinc-400">
+          ${translateText("map_editor.from_image_hint")}
+        </span>
+        <input
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+          class="text-sm"
+          @change=${(e: Event) =>
+            void this.pickImage(
+              (e.target as HTMLInputElement).files?.[0] ?? null,
+            )}
+        />
+        <label class="flex items-center gap-2 text-sm">
+          ${translateText("map_editor.image_mode")}
+          <select
+            class="rounded bg-zinc-800 px-2 py-1 text-white"
+            @change=${(e: Event) =>
+              (this.importMode = (e.target as HTMLSelectElement)
+                .value as ImageImportMode)}
+          >
+            <option value="picture" .selected=${this.importMode === "picture"}>
+              ${translateText("map_editor.image_mode_picture")}
+            </option>
+            <option
+              value="heightmap"
+              .selected=${this.importMode === "heightmap"}
+            >
+              ${translateText("map_editor.image_mode_heightmap")}
+            </option>
+          </select>
+        </label>
+        <button
+          class=${button}
+          ?disabled=${
+            this.importFile === null || !isScenarioSize(this.width, this.height)
+          }
+          @click=${() => void this.createFromImage()}
+        >
+          ${translateText("map_editor.create_from_image", {
+            width: this.width,
+            height: this.height,
+          })}
         </button>
       </div>
       <div class="mt-4 flex flex-wrap items-center gap-3">
@@ -1087,6 +1645,7 @@ export class ScenarioEditor extends LitElement {
         <button
           class=${button}
           ?disabled=${
+            this.shared !== null ||
             !isScenarioSize(this.width, this.height) ||
             (this.width === doc.width && this.height === doc.height)
           }
@@ -1094,8 +1653,23 @@ export class ScenarioEditor extends LitElement {
         >
           ${translateText("scenario_editor.resize")}
         </button>
+        ${this.renderSharing(button)}
         <button
-          class="${button} ml-auto"
+          class="${button} bg-green-700 hover:bg-green-600"
+          ?disabled=${this.uploading || this.starting}
+          title=${translateText("map_editor.upload_hint")}
+          @click=${() => void this.uploadMap()}
+        >
+          ${translateText(
+            this.uploading
+              ? "map_editor.uploading"
+              : this.draftId !== null && customMapOfDraft(this.draftId) !== null
+                ? "map_editor.update"
+                : "map_editor.upload",
+          )}
+        </button>
+        <button
+          class="${button}"
           aria-expanded=${this.playMenu}
           ?disabled=${this.starting}
           @click=${() => this.onPlay()}
@@ -1110,6 +1684,48 @@ export class ScenarioEditor extends LitElement {
       </div>
       ${this.playMenu ? this.renderPlayMenu() : nothing}
     `;
+  }
+
+  /** Invite button, or the session's code and who is in it. */
+  private renderSharing(button: string) {
+    const shared = this.shared;
+    if (shared === null) {
+      return html`<button
+        class="${button} ml-auto"
+        ?disabled=${this.sharing || this.starting}
+        title=${translateText("map_session.invite_hint")}
+        @click=${() => void this.startSharing()}
+      >
+        ${translateText(
+          this.sharing ? "map_session.opening" : "map_session.invite",
+        )}
+      </button>`;
+    }
+    return html`<div class="ml-auto flex items-center gap-2">
+      <span
+        class="rounded bg-zinc-800 px-2 py-1 text-sm"
+        title=${translateText("map_session.code_hint")}
+      >
+        ${translateText("map_session.code")}
+        <span class="font-mono text-lg font-bold tracking-widest"
+          >${shared.code}</span
+        >
+      </span>
+      <span class="flex items-center gap-1">
+        ${this.sharedParticipants.map(
+          (p) =>
+            html`<span
+              class="max-w-24 truncate rounded px-1.5 py-0.5 text-xs font-bold text-black"
+              style="background:${p.color}"
+              title=${p.name}
+              >${p.name}</span
+            >`,
+        )}
+      </span>
+      <button class=${button} @click=${() => this.leaveShared()}>
+        ${translateText("map_session.leave")}
+      </button>
+    </div>`;
   }
 
   /** The playable nations to test play as, or why there are none. */
@@ -1203,20 +1819,57 @@ export class ScenarioEditor extends LitElement {
                 ${
                   this.terrainKind === "land"
                     ? html`<label class="flex flex-col gap-1">
-                        ${translateText("scenario_editor.elevation", {
-                          value: this.elevation,
-                        })}
-                        <input
-                          type="range"
-                          min="0"
-                          max=${MAX_ELEVATION}
-                          .value=${String(this.elevation)}
-                          @input=${(e: Event) =>
-                            (this.elevation = Number(
-                              (e.target as HTMLInputElement).value,
-                            ))}
-                        />
-                      </label>`
+                          ${translateText("scenario_editor.elevation", {
+                            value: this.elevation,
+                          })}
+                          <input
+                            type="range"
+                            min="0"
+                            max=${MAX_ELEVATION}
+                            .value=${String(this.elevation)}
+                            @input=${(e: Event) =>
+                              (this.elevation = Number(
+                                (e.target as HTMLInputElement).value,
+                              ))}
+                          />
+                        </label>
+                        <label
+                          class="flex items-center gap-2"
+                          title=${translateText("scenario_editor.auto_slope_hint")}
+                        >
+                          <input
+                            type="checkbox"
+                            .checked=${this.autoSlope}
+                            @change=${(e: Event) => {
+                              this.autoSlope = (
+                                e.target as HTMLInputElement
+                              ).checked;
+                              this.saveSlopeSettings();
+                            }}
+                          />
+                          ${translateText("scenario_editor.auto_slope")}
+                        </label>
+                        ${
+                          this.autoSlope
+                            ? html`<label class="flex flex-col gap-1">
+                                ${translateText("scenario_editor.slope_width", {
+                                  value: this.slopeWidth,
+                                })}
+                                <input
+                                  type="range"
+                                  min="1"
+                                  max=${MAX_SLOPE_WIDTH}
+                                  .value=${String(this.slopeWidth)}
+                                  @input=${(e: Event) => {
+                                    this.slopeWidth = Number(
+                                      (e.target as HTMLInputElement).value,
+                                    );
+                                    this.saveSlopeSettings();
+                                  }}
+                                />
+                              </label>`
+                            : nothing
+                        }`
                     : nothing
                 }
               `

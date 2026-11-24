@@ -24,7 +24,10 @@ import { MarkDisconnectedExecution } from "./MarkDisconnectedExecution";
 import { MoveWarshipExecution } from "./MoveWarshipExecution";
 import { NationExecution } from "./NationExecution";
 import { NoOpExecution } from "./NoOpExecution";
+import { SurfaceSubmarineExecution } from "./NuclearSubmarineExecution";
 import { PauseExecution } from "./PauseExecution";
+import { DraftPickExecution, DraftResearchExecution } from "./DraftExecution";
+import { CastVoteExecution, ProposeDecreeExecution } from "./PoliticsExecution";
 import { QuickChatExecution } from "./QuickChatExecution";
 import { RetreatExecution } from "./RetreatExecution";
 import { SpawnExecution } from "./SpawnExecution";
@@ -80,6 +83,8 @@ export class Executor {
         return new BoatRetreatExecution(player, intent.unitID);
       case "move_warship":
         return new MoveWarshipExecution(player, intent.unitIds, intent.tile);
+      case "surface_submarine":
+        return new SurfaceSubmarineExecution(player, intent.unitId);
       case "spawn":
         // fromIntent: this one came off the wire, so it is subject to the
         // spawn-phase gate that internal spawns are not.
@@ -120,6 +125,7 @@ export class Executor {
           intent.tile,
           intent.rocketDirectionUp,
           intent.amount,
+          intent.troops,
         );
       case "allianceExtension": {
         return new AllianceExtensionExecution(player, intent.recipient);
@@ -144,6 +150,18 @@ export class Executor {
         return new MarkDisconnectedExecution(player, intent.isDisconnected);
       case "toggle_pause":
         return new PauseExecution(player, intent.paused);
+      case "propose_decree":
+        return new ProposeDecreeExecution(
+          player,
+          intent.decree,
+          intent.target ?? null,
+        );
+      case "cast_vote":
+        return new CastVoteExecution(player, intent.proposalId, intent.vote);
+      case "draft_pick":
+        return new DraftPickExecution(player, intent.card);
+      case "draft_research":
+        return new DraftResearchExecution(player, intent.card);
       default:
         throw new Error(`intent type ${intent} not found`);
     }

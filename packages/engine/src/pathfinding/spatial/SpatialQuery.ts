@@ -42,18 +42,23 @@ const launchCaches = new WeakMap<Player, LaunchCache>();
 // one.
 const MAX_CACHED_LAUNCHES = 4096;
 
-export class SpatialQuery {
-  private boundedAStar: AStarWaterBounded | null = null;
+// The refining search's scratch (about 300 KB), one per map. Callers build a
+// SpatialQuery per question (every boat a nation plans), and each used to
+// allocate its own. The search resets its scratch by stamp and empties its
+// queue at the start of every call, so sharing it changes no answer.
+const boundedAStars = new WeakMap<object, AStarWaterBounded>();
 
+export class SpatialQuery {
   constructor(private game: Game) {}
 
   private getBoundedAStar(): AStarWaterBounded {
-    this.boundedAStar ??= new AStarWaterBounded(
-      this.game.map(),
-      REFINE_MAX_SEARCH_AREA,
-    );
-
-    return this.boundedAStar;
+    const map = this.game.map();
+    let search = boundedAStars.get(map);
+    if (search === undefined) {
+      search = new AStarWaterBounded(map, REFINE_MAX_SEARCH_AREA);
+      boundedAStars.set(map, search);
+    }
+    return search;
   }
 
   /**

@@ -74,7 +74,22 @@ export function unitStateFromUpdate(u: UnitUpdate): UnitState {
     samUpgradeStartRange: u.samUpgrade?.startRange ?? null,
     samUpgradeTargetLevel: u.samUpgrade?.targetLevel ?? null,
     samUpgradeDuration: u.samUpgrade?.duration ?? null,
+    submerged: u.submarineState?.mode === "submerged",
+    submarineMode: submarineModeToNum(u),
+    submarineReadyTick: u.submarineState?.readyTick ?? 0,
   };
+}
+
+/** UnitState.submarineMode: 0 submerged (or no submarine), 1 surfacing, 2 surfaced. */
+function submarineModeToNum(u: UnitUpdate): number {
+  switch (u.submarineState?.mode) {
+    case "surfacing":
+      return 1;
+    case "surfaced":
+      return 2;
+    default:
+      return 0;
+  }
 }
 
 /** Mutate `target` in place from a UnitUpdate, avoiding any allocation. */
@@ -107,6 +122,9 @@ export function applyUnitUpdateInPlace(target: UnitState, u: UnitUpdate): void {
   target.samUpgradeStartRange = u.samUpgrade?.startRange ?? null;
   target.samUpgradeTargetLevel = u.samUpgrade?.targetLevel ?? null;
   target.samUpgradeDuration = u.samUpgrade?.duration ?? null;
+  target.submerged = u.submarineState?.mode === "submerged";
+  target.submarineMode = submarineModeToNum(u);
+  target.submarineReadyTick = u.submarineState?.readyTick ?? 0;
 }
 
 function gamePlayerTypeToEnum(t: PlayerType): PlayerTypeEnum {
@@ -172,6 +190,7 @@ export function playerStateFromUpdate(pu: PlayerUpdate): PlayerState {
     traitorRemainingTicks: Math.max(0, pu.traitorRemainingTicks ?? 0),
     inDoomsdayClock: pu.inDoomsdayClock ?? false,
     isDecaying: pu.isDecaying ?? false,
+    unrestPercent: pu.unrestPercent ?? 0,
     markedDoomsdayClockTick: pu.markedDoomsdayClockTick ?? -1,
     betrayals: pu.betrayals!,
     hasSpawned: pu.hasSpawned!,

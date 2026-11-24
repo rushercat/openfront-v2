@@ -1,6 +1,16 @@
-import { GameMode, GameType, maps } from "@openfront/engine-api/game/GameTypes";
+import {
+  CustomGameMap,
+  GameMode,
+  GameType,
+  maps,
+} from "@openfront/engine-api/game/GameTypes";
 import { GAME_ID_REGEX, GameConfig } from "@openfront/engine-api/Schemas";
+import {
+  historicalScenario,
+  scenarioForConfig,
+} from "@openfront/engine-lib/game/HistoricalScenarios";
 import { assetUrl } from "@openfront/shared/AssetUrls";
+import type { CustomMapInfo } from "@openfront/shared/CustomMaps";
 import { EventBus } from "@openfront/shared/EventBus";
 import { boostWouldMoveLobby } from "@openfront/shared/LobbyBoost";
 import {
@@ -36,14 +46,16 @@ import { hasMapDetails, renderMapDetails } from "./components/map/MapDetails";
 import { inviteFriendsButton } from "./components/ui/InviteFriendsButton";
 import { DEFAULT_TITLE_CLASS, modalHeader } from "./components/ui/ModalHeader";
 import { fetchCosmetics, InsufficientCurrency } from "./Cosmetics";
+import { customMapFileUrl, ensureCustomMapLoaded } from "./CustomMapsApi";
 import { gamePortal } from "./GamePortal";
 import { SendSpectateEvent } from "./LobbyEvents";
 import { PublicLobbySocket } from "./LobbySocket";
 import { JoinLobbyEvent } from "./Main";
-import { openReplayViewer } from "./replay/ReplayEntry";
 import "./components/CopyButton";
-import { ensureServerList, redirectToGameVersion } from "./ServerList";
+import { openReplayViewer } from "./replay/ReplayEntry";
 import "./components/LobbyPlayerView";
+import "./components/ScenarioAssignmentPanel";
+import { ensureServerList, redirectToGameVersion } from "./ServerList";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import { nationsConfigToSlider } from "./utilities/GameConfigHelpers";
 import {
@@ -67,6 +79,8 @@ export class JoinLobbyModal extends BaseModal {
   @state() private gameConfig: GameConfig | null = null;
   @state() private currentLobbyId: string = "";
   @state() private currentClientID: string = "";
+  /** The uploaded custom map the lobby is on, once its info has loaded. */
+  @state() private customMap: CustomMapInfo | null = null;
   @state() private nationCount: number = 0;
   @state() private lobbyStartAt: number | null = null;
   @state() private serverTimeOffset: number = 0;
@@ -358,6 +372,28 @@ export class JoinLobbyModal extends BaseModal {
                 `
               : html`
                   ${this.gameConfig ? this.renderGameConfig() : html``}
+                  ${
+                    this.gameConfig !== null &&
+                    this.gameConfig !== undefined &&
+                    scenarioForConfig(this.gameConfig) !== null
+                      ? html`<scenario-assignment-panel
+                          class="block mt-6"
+                          .scenarioId=${this.gameConfig.historicalScenario!}
+                          .players=${this.players
+                            .filter((p) => p.spectator !== true)
+                            .map((p) => ({
+                              clientID: p.clientID,
+                              username: p.username,
+                            }))}
+                          .assignments=${Object.fromEntries(
+                            (this.gameConfig.scenarioAssignments ?? []).map(
+                              (a) => [a.clientID, a.nation],
+                            ),
+                          )}
+                          .myClientID=${this.currentClientID}
+                        ></scenario-assignment-panel>`
+                      : nothing
+                  }
                   ${
                     this.players.length > 0
                       ? html`
@@ -866,11 +902,24 @@ export class JoinLobbyModal extends BaseModal {
     if (!this.gameConfig) return html``;
 
     const c = this.gameConfig;
-    const mapName = getMapName(c.gameMap);
+    const scenario = scenarioForConfig(c);
+    const custom =
+      c.gameMap === CustomGameMap &&
+      this.customMap !== null &&
+      this.customMap.id === c.customMapId
+        ? this.customMap
+        : null;
+    const mapName =
+      scenario !== null
+        ? translateText(historicalScenario(scenario.id).nameKey)
+        : c.gameMap === CustomGameMap
+          ? (custom?.name ?? translateText("custom_maps.custom_map"))
+          : getMapName(c.gameMap);
     const normalizedMap = normaliseMapKey(c.gameMap);
-    const thumbnailUrl = assetUrl(
-      `maps/${encodeURIComponent(normalizedMap)}/thumbnail.webp`,
-    );
+    const thumbnailUrl =
+      custom !== null
+        ? customMapFileUrl(custom, "thumbnail")
+        : assetUrl(`maps/${encodeURIComponent(normalizedMap)}/thumbnail.webp`);
     const modeSubtitle = getGameModeLabel(c);
 
     const tags = notableLobbySettings(c, this.nationCount).map(
@@ -951,10 +1000,26 @@ export class JoinLobbyModal extends BaseModal {
     this.lobbyStartAt = lobby.startsAt ?? null;
     this.syncCountdownTimer();
     if (lobby.gameConfig) {
-      const mapChanged = this.gameConfig?.gameMap !== lobby.gameConfig.gameMap;
+      const mapChanged =
+        this.gameConfig?.gameMap !== lobby.gameConfig.gameMap ||
+        this.gameConfig?.customMapId !== lobby.gameConfig.customMapId;
       this.gameConfig = lobby.gameConfig;
       if (mapChanged) {
-        void this.loadNationCount();
+        const customId =
+          lobby.gameConfig.gameMap === CustomGameMap
+            ? lobby.gameConfig.customMapId
+            : undefined;
+        if (customId !== undefined) {
+          // Loads the uploaded map as the Custom map, then counts its nations.
+          void ensureCustomMapLoaded(customId)
+            .then((info) => {
+              this.customMap = info;
+              return this.loadNationCount();
+            })
+            .catch((e) => console.warn("custom map failed to load:", e));
+        } else {
+          void this.loadNationCount();
+        }
       }
     }
 

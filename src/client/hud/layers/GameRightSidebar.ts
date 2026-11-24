@@ -4,6 +4,7 @@ import { EventBus } from "@openfront/shared/EventBus";
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createNextLobby } from "../../Api";
+import { ToggleEventLogEvent } from "../../chronicle/EventLogPanel";
 import { ClientEnv } from "../../ClientEnv";
 import "../../components/DoomsdayClockPanel";
 import "../../components/OvertimePanel";
@@ -406,6 +407,31 @@ export class GameRightSidebar extends LitElement implements Controller {
 
         <!-- Buttons -->
         ${this.maybeRenderReplayButtons()}
+
+        <button
+          type="button"
+          data-event-log-button
+          class="cursor-pointer bg-transparent border-0 p-0 flex items-center justify-center text-white"
+          title=${translateText("match_log.title")}
+          aria-label=${translateText("match_log.title")}
+          @click=${() => this.eventBus.emit(new ToggleEventLogEvent())}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M8 6h13M8 12h13M8 18h13" />
+            <circle cx="3.5" cy="6" r="1" fill="currentColor" />
+            <circle cx="3.5" cy="12" r="1" fill="currentColor" />
+            <circle cx="3.5" cy="18" r="1" fill="currentColor" />
+          </svg>
+        </button>
 
         <div class="cursor-pointer" @click=${this.onSettingsButtonClick}>
           <img src=${settingsIcon} alt="settings" width="20" height="20" />

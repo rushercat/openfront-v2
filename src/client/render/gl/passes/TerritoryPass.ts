@@ -276,6 +276,12 @@ export class TerritoryPass {
     this.currentBucket = (this.currentBucket + 1) % this.nBuckets;
   }
 
+  /** Drain the next `count` drip buckets (at most all of them). */
+  drainDripBuckets(count: number): void {
+    const n = Math.min(count, this.nBuckets);
+    for (let i = 0; i < n; i++) this.drainDripBucket();
+  }
+
   /**
    * Drain every drip bucket immediately. Used during spawn phase and after
    * seek so tile state pops to current sim state without the 60Hz stagger.

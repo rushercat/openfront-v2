@@ -26,19 +26,96 @@ import { UserSettings } from "../../UserSettings";
 import { resolveKeybindLabel, translateText } from "../../Utils";
 import { GameView } from "../../view";
 import {
+  aaDefenseIcon,
+  aircraftCarrierIcon,
+  airfieldIcon,
+  capitalIcon,
+  cruiseMissileIcon,
+  transportPlaneIcon,
   atomBombIcon,
+  bomberIcon,
   cityIcon,
   defensePostIcon,
   factoryIcon,
+  fighterJetIcon,
   goldCoinIcon,
   hydrogenBombIcon,
+  landMineIcon,
   mirvIcon,
   missileSiloIcon,
+  nuclearSubmarineIcon,
   portIcon,
+  railDepotIcon,
   samLauncherIcon,
+  seaMineIcon,
+  repairStationIcon,
+  tankIcon,
   warshipIcon,
 } from "../HotbarIcons";
+import { goldBreakdown } from "../IncomeBreakdown";
 import { TutorialHighlight, TutorialHighlightEvent } from "../Tutorial";
+
+/**
+ * openfront v2: what a unit needs before it can be built (any one of the
+ * listed buildings). The hotbar shows a lock and names them, so players see
+ * what to build or save for first.
+ */
+const PREREQUISITES: Partial<Record<UnitType, UnitType[]>> = {
+  [UnitType.AtomBomb]: [UnitType.MissileSilo],
+  [UnitType.HydrogenBomb]: [UnitType.MissileSilo],
+  [UnitType.MIRV]: [UnitType.MissileSilo],
+  [UnitType.CruiseMissile]: [UnitType.MissileSilo],
+  [UnitType.Warship]: [UnitType.Port],
+  [UnitType.NuclearSubmarine]: [UnitType.Port],
+  [UnitType.AircraftCarrier]: [UnitType.Port],
+  [UnitType.Tank]: [UnitType.Factory],
+  [UnitType.FighterJet]: [UnitType.Airfield, UnitType.AircraftCarrier],
+  [UnitType.Bomber]: [UnitType.Airfield, UnitType.AircraftCarrier],
+  [UnitType.TransportPlane]: [UnitType.Airfield, UnitType.AircraftCarrier],
+};
+
+/** Translation key (unit_type.*) of a unit type, for the lock hint. */
+const UNIT_KEYS: Partial<Record<UnitType, string>> = {
+  [UnitType.MissileSilo]: "missile_silo",
+  [UnitType.Port]: "port",
+  [UnitType.Factory]: "factory",
+  [UnitType.Airfield]: "airfield",
+  [UnitType.AircraftCarrier]: "aircraft_carrier",
+};
+
+/** The units on each hotbar row (0 plain, 1 Shift, 2 Alt). */
+const ROW_TYPES: PlayerBuildableUnitType[][] = [
+  [
+    UnitType.City,
+    UnitType.Factory,
+    UnitType.Port,
+    UnitType.DefensePost,
+    UnitType.MissileSilo,
+    UnitType.SAMLauncher,
+    UnitType.Warship,
+    UnitType.AtomBomb,
+    UnitType.HydrogenBomb,
+    UnitType.MIRV,
+  ],
+  [
+    UnitType.AADefense,
+    UnitType.Airfield,
+    UnitType.FighterJet,
+    UnitType.Bomber,
+    UnitType.RailDepot,
+    UnitType.Tank,
+    UnitType.NuclearSubmarine,
+    UnitType.LandMine,
+    UnitType.SeaMine,
+    UnitType.RepairStation,
+  ],
+  [
+    UnitType.AircraftCarrier,
+    UnitType.CruiseMissile,
+    UnitType.TransportPlane,
+    UnitType.Capital,
+  ],
+];
 
 /** How long a build button has to be held before it shows its details (cost etc.) */
 const PEEK_HOLD_MS = 450;
@@ -60,6 +137,27 @@ export class UnitDisplay extends LitElement implements Controller {
   private keyboardLayout = new KeyboardLayoutController(this);
   private _cities = 0;
   private _warships = 0;
+  private _aaDefense = 0;
+  private _airfields = 0;
+  private _fighterJets = 0;
+  private _bombers = 0;
+  private _railDepots = 0;
+  private _tanks = 0;
+  private _nuclearSubmarines = 0;
+  private _landMines = 0;
+  private _seaMines = 0;
+  private _repairStations = 0;
+  private _carriers = 0;
+  private _cruiseMissiles = 0;
+  private _transportPlanes = 0;
+  private _capitals = 0;
+  // The second row of the bar shows while Shift is held, the third while
+  // Alt is; the toggle at the end pins one (0, 1 or 2).
+  private shiftHeld = false;
+  private altHeld = false;
+  private pinnedRow = 0;
+  /** openfront v2: the unit the player saves for (right-click on the bar). */
+  private savingsGoal: PlayerBuildableUnitType | null = null;
   private _factories = 0;
   private _missileSilo = 0;
   private _port = 0;
@@ -176,6 +274,9 @@ export class UnitDisplay extends LitElement implements Controller {
     document.addEventListener("touchstart", this.handlePeekTouchEvent, true);
     document.addEventListener("touchend", this.handlePeekTouchEvent, true);
     document.addEventListener("touchcancel", this.handlePeekTouchEvent, true);
+    window.addEventListener("keydown", this.onShiftKey);
+    window.addEventListener("keyup", this.onShiftKey);
+    window.addEventListener("blur", this.onWindowBlur);
     this.windowListenersAttached = true;
   }
 
@@ -206,6 +307,11 @@ export class UnitDisplay extends LitElement implements Controller {
     this.suppressNextClick = false;
     this.suppressReleaseClick = false;
     this.clearTouchClickTarget();
+    window.removeEventListener("keydown", this.onShiftKey);
+    window.removeEventListener("keyup", this.onShiftKey);
+    window.removeEventListener("blur", this.onWindowBlur);
+    this.shiftHeld = false;
+    this.altHeld = false;
     this.windowListenersAttached = false;
   }
 
@@ -549,30 +655,34 @@ export class UnitDisplay extends LitElement implements Controller {
     return 0n;
   }
 
+  /** The buildings a unit still needs (none owned), or null. */
+  private missingPrereq(item: UnitType): UnitType[] | null {
+    const needs = PREREQUISITES[item];
+    if (needs === undefined) return null;
+    const player = this.game?.myPlayer();
+    if (needs.some((t) => (player?.units(t).length ?? 0) > 0)) return null;
+    // Only name what the lobby lets the player build at all.
+    const possible = needs.filter(
+      (t) =>
+        !this.game.config().isUnitDisabled(t) &&
+        this.game.isDraftLocked?.(t) !== true,
+    );
+    return possible.length > 0 ? possible : needs;
+  }
+
   private canBuild(item: UnitType): boolean {
     if (this.game?.config().isUnitDisabled(item)) return false;
+    if (this.game?.isDraftLocked?.(item) === true) return false;
+    if (this.missingPrereq(item) !== null) return false;
     const player = this.game?.myPlayer();
-    switch (item) {
-      case UnitType.AtomBomb:
-      case UnitType.HydrogenBomb:
-      case UnitType.MIRV:
-        return (
-          this.cost(item) <= (player?.gold() ?? 0n) &&
-          (player?.units(UnitType.MissileSilo).length ?? 0) > 0
-        );
-      case UnitType.Warship:
-        return (
-          this.cost(item) <= (player?.gold() ?? 0n) &&
-          (player?.units(UnitType.Port).length ?? 0) > 0
-        );
-      default:
-        return this.cost(item) <= (player?.gold() ?? 0n);
-    }
+    return this.cost(item) <= (player?.gold() ?? 0n);
   }
 
   private isUnitDisplayed(unitType: PlayerBuildableUnitType): boolean {
     return (
       !this.game.config().isUnitDisabled(unitType) &&
+      // Draft mode: the hotbar shows only the deck.
+      this.game.isDraftLocked?.(unitType) !== true &&
       (!this.tutorialMode || unitType === UnitType.AtomBomb)
     );
   }
@@ -593,6 +703,20 @@ export class UnitDisplay extends LitElement implements Controller {
     this._samLauncher = player.totalUnitLevels(UnitType.SAMLauncher);
     this._factories = player.totalUnitLevels(UnitType.Factory);
     this._warships = player.totalUnitLevels(UnitType.Warship);
+    this._aaDefense = player.totalUnitLevels(UnitType.AADefense);
+    this._airfields = player.totalUnitLevels(UnitType.Airfield);
+    this._fighterJets = player.totalUnitLevels(UnitType.FighterJet);
+    this._bombers = player.totalUnitLevels(UnitType.Bomber);
+    this._railDepots = player.totalUnitLevels(UnitType.RailDepot);
+    this._tanks = player.totalUnitLevels(UnitType.Tank);
+    this._nuclearSubmarines = player.totalUnitLevels(UnitType.NuclearSubmarine);
+    this._landMines = player.totalUnitLevels(UnitType.LandMine);
+    this._seaMines = player.totalUnitLevels(UnitType.SeaMine);
+    this._repairStations = player.totalUnitLevels(UnitType.RepairStation);
+    this._carriers = player.totalUnitLevels(UnitType.AircraftCarrier);
+    this._cruiseMissiles = player.totalUnitLevels(UnitType.CruiseMissile);
+    this._transportPlanes = player.totalUnitLevels(UnitType.TransportPlane);
+    this._capitals = player.totalUnitLevels(UnitType.Capital);
     this.requestUpdate();
   }
 
@@ -636,82 +760,263 @@ export class UnitDisplay extends LitElement implements Controller {
           <div
             class="unit-display-grid grid gap-0.5 grid-rows-1 grid-flow-col auto-cols-fr lg:auto-cols-max lg:w-fit lg:mx-auto side-bar:grid-rows-none side-bar:grid-flow-row side-bar:grid-cols-1"
           >
-            ${this.renderUnitItem(
-              cityIcon,
-              this._cities,
-              UnitType.City,
-              "city",
-              this.getHotkey("buildCity", "Digit1"),
-            )}
-            ${this.renderUnitItem(
-              factoryIcon,
-              this._factories,
-              UnitType.Factory,
-              "factory",
-              this.getHotkey("buildFactory", "Digit2"),
-            )}
-            ${this.renderUnitItem(
-              portIcon,
-              this._port,
-              UnitType.Port,
-              "port",
-              this.getHotkey("buildPort", "Digit3"),
-            )}
-            ${this.renderUnitItem(
-              defensePostIcon,
-              this._defensePost,
-              UnitType.DefensePost,
-              "defense_post",
-              this.getHotkey("buildDefensePost", "Digit4"),
-            )}
-            ${this.renderUnitItem(
-              missileSiloIcon,
-              this._missileSilo,
-              UnitType.MissileSilo,
-              "missile_silo",
-              this.getHotkey("buildMissileSilo", "Digit5"),
-            )}
-            ${this.renderUnitItem(
-              samLauncherIcon,
-              this._samLauncher,
-              UnitType.SAMLauncher,
-              "sam_launcher",
-              this.getHotkey("buildSamLauncher", "Digit6"),
-            )}
-            ${this.renderUnitItem(
-              warshipIcon,
-              this._warships,
-              UnitType.Warship,
-              "warship",
-              this.getHotkey("buildWarship", "Digit7"),
-            )}
-            ${this.renderUnitItem(
-              atomBombIcon,
-              null,
-              UnitType.AtomBomb,
-              "atom_bomb",
-              this.getHotkey("buildAtomBomb", "Digit8"),
-            )}
-            ${this.renderUnitItem(
-              hydrogenBombIcon,
-              null,
-              UnitType.HydrogenBomb,
-              "hydrogen_bomb",
-              this.getHotkey("buildHydrogenBomb", "Digit9"),
-            )}
-            ${this.renderUnitItem(
-              mirvIcon,
-              null,
-              UnitType.MIRV,
-              "mirv",
-              this.getHotkey("buildMIRV", "Digit0"),
-            )}
+            ${this.renderUnitRows()} ${this.renderRowToggle()}
+            ${this.renderSavingsGoalChip()}
           </div>
         </div>
         ${this.renderUnitTooltip()}
       </div>
     `;
   }
+
+  /**
+   * The bar holds two rows of units. The second (air, ground and naval
+   * units, mines) shows while Shift is held, matching its Shift + number
+   * hotkeys, or while the toggle at the end of the bar pins it.
+   */
+  private renderUnitRows() {
+    const row = this.currentRow();
+    if (row === 2) {
+      return html`
+        ${this.renderUnitItem(
+          aircraftCarrierIcon,
+          this._carriers,
+          UnitType.AircraftCarrier,
+          "aircraft_carrier",
+          this.getHotkey("buildAircraftCarrier", "Alt+Digit1"),
+        )}
+        ${this.renderUnitItem(
+          cruiseMissileIcon,
+          this._cruiseMissiles,
+          UnitType.CruiseMissile,
+          "cruise_missile",
+          this.getHotkey("buildCruiseMissile", "Alt+Digit2"),
+        )}
+        ${this.renderUnitItem(
+          transportPlaneIcon,
+          this._transportPlanes,
+          UnitType.TransportPlane,
+          "transport_plane",
+          this.getHotkey("buildTransportPlane", "Alt+Digit3"),
+        )}
+        ${this.renderUnitItem(
+          capitalIcon,
+          this._capitals,
+          UnitType.Capital,
+          "capital",
+          this.getHotkey("buildCapital", "Alt+Digit4"),
+        )}
+      `;
+    }
+    if (row === 0) {
+      return html`
+        ${this.renderUnitItem(
+          cityIcon,
+          this._cities,
+          UnitType.City,
+          "city",
+          this.getHotkey("buildCity", "Digit1"),
+        )}
+        ${this.renderUnitItem(
+          factoryIcon,
+          this._factories,
+          UnitType.Factory,
+          "factory",
+          this.getHotkey("buildFactory", "Digit2"),
+        )}
+        ${this.renderUnitItem(
+          portIcon,
+          this._port,
+          UnitType.Port,
+          "port",
+          this.getHotkey("buildPort", "Digit3"),
+        )}
+        ${this.renderUnitItem(
+          defensePostIcon,
+          this._defensePost,
+          UnitType.DefensePost,
+          "defense_post",
+          this.getHotkey("buildDefensePost", "Digit4"),
+        )}
+        ${this.renderUnitItem(
+          missileSiloIcon,
+          this._missileSilo,
+          UnitType.MissileSilo,
+          "missile_silo",
+          this.getHotkey("buildMissileSilo", "Digit5"),
+        )}
+        ${this.renderUnitItem(
+          samLauncherIcon,
+          this._samLauncher,
+          UnitType.SAMLauncher,
+          "sam_launcher",
+          this.getHotkey("buildSamLauncher", "Digit6"),
+        )}
+        ${this.renderUnitItem(
+          warshipIcon,
+          this._warships,
+          UnitType.Warship,
+          "warship",
+          this.getHotkey("buildWarship", "Digit7"),
+        )}
+        ${this.renderUnitItem(
+          atomBombIcon,
+          null,
+          UnitType.AtomBomb,
+          "atom_bomb",
+          this.getHotkey("buildAtomBomb", "Digit8"),
+        )}
+        ${this.renderUnitItem(
+          hydrogenBombIcon,
+          null,
+          UnitType.HydrogenBomb,
+          "hydrogen_bomb",
+          this.getHotkey("buildHydrogenBomb", "Digit9"),
+        )}
+        ${this.renderUnitItem(
+          mirvIcon,
+          null,
+          UnitType.MIRV,
+          "mirv",
+          this.getHotkey("buildMIRV", "Digit0"),
+        )}
+      `;
+    }
+    return html`
+      ${this.renderUnitItem(
+        aaDefenseIcon,
+        this._aaDefense,
+        UnitType.AADefense,
+        "aa_defense",
+        this.getHotkey("buildAADefense", "Shift+Digit1"),
+      )}
+      ${this.renderUnitItem(
+        airfieldIcon,
+        this._airfields,
+        UnitType.Airfield,
+        "airfield",
+        this.getHotkey("buildAirfield", "Shift+Digit2"),
+      )}
+      ${this.renderUnitItem(
+        fighterJetIcon,
+        this._fighterJets,
+        UnitType.FighterJet,
+        "fighter_jet",
+        this.getHotkey("buildFighterJet", "Shift+Digit3"),
+      )}
+      ${this.renderUnitItem(
+        bomberIcon,
+        this._bombers,
+        UnitType.Bomber,
+        "bomber",
+        this.getHotkey("buildBomber", "Shift+Digit4"),
+      )}
+      ${this.renderUnitItem(
+        railDepotIcon,
+        this._railDepots,
+        UnitType.RailDepot,
+        "rail_depot",
+        this.getHotkey("buildRailDepot", "Shift+Digit5"),
+      )}
+      ${this.renderUnitItem(
+        tankIcon,
+        this._tanks,
+        UnitType.Tank,
+        "tank",
+        this.getHotkey("buildTank", "Shift+Digit6"),
+      )}
+      ${this.renderUnitItem(
+        nuclearSubmarineIcon,
+        this._nuclearSubmarines,
+        UnitType.NuclearSubmarine,
+        "nuclear_submarine",
+        this.getHotkey("buildNuclearSubmarine", "Shift+Digit7"),
+      )}
+      ${this.renderMineItem()}
+      ${this.renderUnitItem(
+        repairStationIcon,
+        this._repairStations,
+        UnitType.RepairStation,
+        "repair_station",
+        this.getHotkey("buildRepairStation", "Shift+Digit0"),
+      )}
+    `;
+  }
+
+  /** The row on show: 0 (structures, nukes), 1 (Shift) or 2 (Alt). */
+  private currentRow(): number {
+    // Rows without a single unit (e.g. "Classic" lobbies) are skipped.
+    if (this.altHeld && this.rowHasUnits(2)) return 2;
+    if (this.shiftHeld && this.rowHasUnits(1)) {
+      return this.pinnedRow === 1 ? 0 : 1;
+    }
+    return this.rowHasUnits(this.pinnedRow) ? this.pinnedRow : 0;
+  }
+
+  private rowHasUnits(row: number): boolean {
+    return ROW_TYPES[row].some((t) => this.isUnitDisplayed(t));
+  }
+
+  /** The next row the toggle pins, skipping empty ones. */
+  private nextRow(): number {
+    for (let i = 1; i <= 2; i++) {
+      const row = (this.pinnedRow + i) % 3;
+      if (row === 0 || this.rowHasUnits(row)) return row;
+    }
+    return 0;
+  }
+
+  private renderRowToggle() {
+    // The onboarding tutorial only ever shows its atom bomb.
+    if (this.tutorialMode) {
+      return nothing;
+    }
+    // Nothing to switch to: no toggle at all.
+    if (!this.rowHasUnits(1) && !this.rowHasUnits(2)) return nothing;
+    const row = this.currentRow();
+    return html`
+      <div class="flex flex-col items-center relative">
+        <button
+          class="border border-slate-500 rounded-sm max-lg:landscape:h-7.5 side-bar:h-12 side-bar:min-w-6.5 w-full h-full px-1 flex items-center justify-center cursor-pointer text-white pointer-fine:hover:bg-gray-800 ${
+            row !== 0 ? "bg-slate-400/20" : ""
+          }"
+          title=${translateText("build_menu.switch_row")}
+          @click=${() => {
+            this.pinnedRow = this.nextRow();
+            this.requestUpdate();
+          }}
+        >
+          <span class="text-xs font-bold"
+            >${row === 0 ? "⇧" : row === 1 ? "Alt" : "1"}</span
+          >
+        </button>
+      </div>
+    `;
+  }
+
+  private onShiftKey = (event: KeyboardEvent) => {
+    const held = event.type === "keydown";
+    if (event.key === "Shift") {
+      if (held !== this.shiftHeld) {
+        this.shiftHeld = held;
+        this.requestUpdate();
+      }
+      return;
+    }
+    // Left Alt only: Right Alt is AltGr on many layouts.
+    if (event.code === "AltLeft" && held !== this.altHeld) {
+      this.altHeld = held;
+      this.requestUpdate();
+    }
+  };
+
+  private onWindowBlur = () => {
+    if (this.shiftHeld || this.altHeld) {
+      this.shiftHeld = false;
+      this.altHeld = false;
+      this.requestUpdate();
+    }
+  };
 
   private getHotkey(action: string, defaultCode: string): string {
     // Without a keyboard the hotkeys cannot be used, so don't resolve them
@@ -721,6 +1026,42 @@ export class UnitDisplay extends LitElement implements Controller {
       this.keybinds[action],
       defaultCode,
       this.keyboardLayout.map,
+    );
+  }
+
+  /**
+   * openfront v2: one slot for both mines. The placement picks the right
+   * one for the tile under the cursor (BuildPreviewController.autoMine):
+   * a land mine on land, a sea mine on water.
+   */
+  private renderMineItem() {
+    const land = this.isUnitDisplayed(UnitType.LandMine);
+    const sea = this.isUnitDisplayed(UnitType.SeaMine);
+    if (!land && !sea) return html``;
+    if (!land || !sea) {
+      return land
+        ? this.renderUnitItem(
+            landMineIcon,
+            this._landMines,
+            UnitType.LandMine,
+            "land_mine",
+            this.getHotkey("buildLandMine", "Shift+Digit8"),
+          )
+        : this.renderUnitItem(
+            seaMineIcon,
+            this._seaMines,
+            UnitType.SeaMine,
+            "sea_mine",
+            this.getHotkey("buildSeaMine", "Shift+Digit9"),
+          );
+    }
+    const ghost = this.uiState.ghostStructure;
+    return this.renderUnitItem(
+      ghost === UnitType.SeaMine ? seaMineIcon : landMineIcon,
+      this._landMines + this._seaMines,
+      ghost === UnitType.SeaMine ? UnitType.SeaMine : UnitType.LandMine,
+      "mine",
+      this.getHotkey("buildLandMine", "Shift+Digit8"),
     );
   }
 
@@ -734,8 +1075,13 @@ export class UnitDisplay extends LitElement implements Controller {
     if (!this.isUnitDisplayed(unitType)) {
       return html``;
     }
-    const selected = this.uiState.ghostStructure === unitType;
+    const ghost = this.uiState.ghostStructure;
+    const selected =
+      ghost === unitType ||
+      (structureKey === "mine" &&
+        (ghost === UnitType.LandMine || ghost === UnitType.SeaMine));
     const displayHotkey = hotkey
+      .replace(/^Shift\+/i, "⇧")
       .replace("Digit", "")
       .replace("Key", "")
       .toUpperCase();
@@ -758,8 +1104,13 @@ export class UnitDisplay extends LitElement implements Controller {
           this.requestUpdate();
         }}
         @pointerdown=${(event: PointerEvent) => {
+          if (event.button === 2) return;
           this.startPeek(event, unitType, structureKey, hotkey);
           this.armPlaceDrag(event, unitType);
+        }}
+        @contextmenu=${(event: Event) => {
+          event.preventDefault();
+          this.toggleSavingsGoal(unitType);
         }}
       >
         <div
@@ -771,7 +1122,8 @@ export class UnitDisplay extends LitElement implements Controller {
               ? "pointer-fine:hover:bg-gray-400/10"
               : "pointer-fine:hover:bg-gray-800"
           }
-             rounded-sm text-white ${selected ? "bg-slate-400/20" : ""}
+             rounded-sm text-white relative ${selected ? "bg-slate-400/20" : ""}
+             ${this.savingsGoal === unitType ? "ring-1 ring-yellow-400" : ""}
              ${this.tutorialHighlight === unitType ? "tutorial-highlight" : ""}"
           @click=${(event: Event) => {
             const item = (event.currentTarget as HTMLElement).closest(
@@ -850,8 +1202,160 @@ export class UnitDisplay extends LitElement implements Controller {
                 : null
             }
           </div>
+          ${this.renderAffordance(unitType)}
         </div>
       </div>
+    `;
+  }
+
+  // ── openfront v2: what to save for ─────────────────────────────────────
+
+  private toggleSavingsGoal(unitType: PlayerBuildableUnitType) {
+    this.savingsGoal = this.savingsGoal === unitType ? null : unitType;
+    this.requestUpdate();
+  }
+
+  /** Estimated gold per second (fixed income plus recent trade). */
+  private goldPerSecond(): number {
+    const me = this.game?.myPlayer();
+    if (!me) return 0;
+    return goldBreakdown(this.game, me).total;
+  }
+
+  /** "~40 s" / "~3 min" until `missing` gold is in, or "" if unknown. */
+  private etaText(missing: bigint): string {
+    const rate = this.goldPerSecond();
+    if (rate <= 0) return "";
+    const seconds = Math.ceil(Number(missing) / rate);
+    if (seconds < 90) return `~${seconds} s`;
+    return `~${Math.round(seconds / 60)} min`;
+  }
+
+  /** Lock (missing building) or a gold bar (how close it is to affordable). */
+  private renderAffordance(unitType: PlayerBuildableUnitType) {
+    if (this.missingPrereq(unitType) !== null) {
+      return html`<span
+        class="absolute -top-1.5 -right-1 text-[9px] leading-none pointer-events-none"
+        >🔒</span
+      >`;
+    }
+    const cost = this.cost(unitType);
+    const gold = this.game?.myPlayer()?.gold() ?? 0n;
+    if (cost <= 0n || gold >= cost) return nothing;
+    const percent = Number((gold * 100n) / cost);
+    return html`<div
+      class="absolute left-0 bottom-0 h-0.5 rounded-sm bg-yellow-400/80 pointer-events-none"
+      style="width: ${percent}%"
+    ></div>`;
+  }
+
+  /** The savings goal as a small chip at the end of the bar. */
+  private renderSavingsGoalChip() {
+    const goal = this.savingsGoal;
+    if (goal === null || !this.isUnitDisplayed(goal)) return nothing;
+    const cost = this.cost(goal);
+    const gold = this.game?.myPlayer()?.gold() ?? 0n;
+    const prereq = this.missingPrereq(goal);
+    const ready = prereq === null && gold >= cost;
+    const percent =
+      cost > 0n ? Math.min(100, Number((gold * 100n) / cost)) : 100;
+    const label = ready
+      ? translateText("savings.ready")
+      : prereq !== null
+        ? `🔒 ${prereq.map((t) => translateText("unit_type." + (UNIT_KEYS[t] ?? ""))).join(" / ")}`
+        : `${percent}% ${this.etaText(cost - gold)}`;
+    return html`
+      <div class="flex flex-col items-center relative">
+        <button
+          class="border rounded-sm h-full w-full px-1 flex items-center gap-1 text-[10px] font-bold whitespace-nowrap cursor-pointer max-lg:landscape:h-7.5 side-bar:h-12 ${
+            ready
+              ? "border-green-400 text-green-300 bg-green-500/15 animate-pulse"
+              : "border-yellow-400/70 text-yellow-200"
+          }"
+          title=${translateText("savings.clear_hint")}
+          @click=${() => this.toggleSavingsGoal(goal)}
+        >
+          🎯 ${translateText("unit_type." + this.structureKeyOf(goal))}
+          <span class="font-normal">${label}</span>
+        </button>
+      </div>
+    `;
+  }
+
+  private structureKeyOf(type: PlayerBuildableUnitType): string {
+    return (
+      (
+        {
+          [UnitType.City]: "city",
+          [UnitType.Factory]: "factory",
+          [UnitType.Port]: "port",
+          [UnitType.DefensePost]: "defense_post",
+          [UnitType.MissileSilo]: "missile_silo",
+          [UnitType.SAMLauncher]: "sam_launcher",
+          [UnitType.Warship]: "warship",
+          [UnitType.AtomBomb]: "atom_bomb",
+          [UnitType.HydrogenBomb]: "hydrogen_bomb",
+          [UnitType.MIRV]: "mirv",
+          [UnitType.AADefense]: "aa_defense",
+          [UnitType.Airfield]: "airfield",
+          [UnitType.FighterJet]: "fighter_jet",
+          [UnitType.Bomber]: "bomber",
+          [UnitType.RailDepot]: "rail_depot",
+          [UnitType.Tank]: "tank",
+          [UnitType.NuclearSubmarine]: "nuclear_submarine",
+          [UnitType.LandMine]: "land_mine",
+          [UnitType.SeaMine]: "sea_mine",
+          [UnitType.RepairStation]: "repair_station",
+          [UnitType.AircraftCarrier]: "aircraft_carrier",
+          [UnitType.CruiseMissile]: "cruise_missile",
+          [UnitType.TransportPlane]: "transport_plane",
+          [UnitType.Capital]: "capital",
+        } as Partial<Record<UnitType, string>>
+      )[type] ?? ""
+    );
+  }
+
+  /** Lock reason, missing gold and the goal hint for the tooltip. */
+  private renderSavingsTooltip(unitType: PlayerBuildableUnitType) {
+    const prereq = this.missingPrereq(unitType);
+    const cost = this.cost(unitType);
+    const gold = this.game?.myPlayer()?.gold() ?? 0n;
+    return html`
+      ${
+        prereq !== null
+          ? html`<div class="px-2 text-orange-300">
+              🔒
+              ${translateText("savings.needs", {
+                units: prereq
+                  .map((t) =>
+                    translateText("unit_type." + (UNIT_KEYS[t] ?? "")),
+                  )
+                  .join(translateText("savings.or")),
+              })}
+            </div>`
+          : nothing
+      }
+      ${
+        cost > gold
+          ? html`<div class="px-2 text-yellow-200/80">
+              ${translateText("savings.missing", {
+                gold: renderNumber(cost - gold),
+                eta: this.etaText(cost - gold),
+              })}
+            </div>`
+          : nothing
+      }
+      ${
+        Platform.hasKeyboard
+          ? html`<div class="px-2 text-[10px] text-white/50">
+              ${translateText(
+                this.savingsGoal === unitType
+                  ? "savings.clear_hint"
+                  : "savings.set_hint",
+              )}
+            </div>`
+          : nothing
+      }
     `;
   }
 
@@ -919,6 +1423,7 @@ export class UnitDisplay extends LitElement implements Controller {
             >${renderNumber(this.cost(tooltip.unitType))}</span
           >
         </div>
+        ${this.renderSavingsTooltip(tooltip.unitType)}
       </div>
     `;
   }

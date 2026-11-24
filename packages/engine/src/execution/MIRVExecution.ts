@@ -36,6 +36,7 @@ import type {
 } from "../snapshot/SnapshotContext";
 import { DistanceBasedBezierCurve } from "../utilities/Line";
 import { NukeExecution } from "./NukeExecution";
+import { recordNukeLaunch } from "./NukeLaunch";
 
 export class MirvExecution implements Execution {
   private active = true;
@@ -168,13 +169,9 @@ export class MirvExecution implements Execution {
         );
       }
 
-      // after sending a nuke set the missilesilo on cooldown
-      const silo = this.player
-        .units(UnitType.MissileSilo)
-        .find((silo) => silo.tile() === spawn);
-      if (silo) {
-        silo.launch();
-      }
+      // after sending a nuke set the missilesilo on cooldown (or spend the
+      // payload of the submarine it came from)
+      recordNukeLaunch(this.mg, this.player, spawn, UnitType.MIRV);
     }
 
     // make the MIRV inactive if it was destroyed or cancelled externally

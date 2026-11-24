@@ -8,16 +8,18 @@ import {
   maps,
 } from "@openfront/engine-api/game/GameTypes";
 import { assetUrl } from "@openfront/shared/AssetUrls";
+import type { CustomMapInfo } from "@openfront/shared/CustomMaps";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
+import { customMapFileUrl } from "../../CustomMapsApi";
 import { translateText } from "../../Utils";
 import "./AtlasMap";
 import "./MapDisplay";
 import { getFavoriteMaps, starIcon, toggleFavoriteMap } from "./MapFavorites";
 const randomMap = assetUrl("images/RandomMap.webp");
 
-type MapTab = "featured" | "all" | "atlas" | "favorites";
+type MapTab = "featured" | "all" | "atlas" | "favorites" | "custom";
 
 // Featured grid order: ranked maps first (1 = first), unranked alphabetical.
 const featuredMaps: MapInfo[] = listedMaps
@@ -43,6 +45,15 @@ export class MapPicker extends LitElement {
     new Map();
   @property({ attribute: false }) onSelectMap?: (map: GameMapType) => void;
   @property({ attribute: false }) onSelectRandom?: () => void;
+  // openfront v2: maps uploaded from the map editor, their own category.
+  // null while loading; the tab is only shown when the parent passes them.
+  @property({ attribute: false }) customMaps: CustomMapInfo[] | null = null;
+  @property({ type: Boolean }) customMapsError = false;
+  @property({ type: String }) selectedCustomMapId: string | null = null;
+  @property({ attribute: false }) onSelectCustomMap?: (
+    map: CustomMapInfo,
+  ) => void;
+  @property({ attribute: false }) onRefreshCustomMaps?: () => void;
   @state() private activeTab: MapTab = "featured";
   @state() private expandedCategories: Set<string> = new Set();
   @state() private favorites: GameMapType[] = getFavoriteMaps();
@@ -110,7 +121,11 @@ export class MapPicker extends LitElement {
       >
         <map-display
           .mapKey=${map.id}
-          .selected=${!this.useRandomMap && this.selectedMap === map.type}
+          .selected=${
+            !this.useRandomMap &&
+            this.selectedCustomMapId === null &&
+            this.selectedMap === map.type
+          }
           .showMedals=${this.showMedals}
           .wins=${this.getWins(map.type)}
           .favorite=${this.favorites.includes(map.type)}
@@ -272,8 +287,105 @@ export class MapPicker extends LitElement {
     ></atlas-map>`;
   }
 
+  /** One uploaded custom map: thumbnail, name, size and author. */
+  private renderCustomMapCard(map: CustomMapInfo) {
+    const selected = this.selectedCustomMapId === map.id;
+    return html`<button
+      type="button"
+      aria-pressed=${selected}
+      @click=${() => this.onSelectCustomMap?.(map)}
+      class="relative w-full h-full p-3 flex flex-col items-center justify-between rounded-xl border cursor-pointer transition-all duration-200 active:scale-95 gap-2 group ${
+        selected
+          ? "bg-malibu-blue/20 border-malibu-blue/50 shadow-[var(--shadow-malibu-blue-strong)]"
+          : "bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20"
+      }"
+    >
+      <div
+        class="w-full aspect-[2/1] relative overflow-hidden rounded-lg bg-black/20"
+      >
+        <img
+          src=${customMapFileUrl(map, "thumbnail")}
+          alt=${map.name}
+          draggable="false"
+          @dragstart=${this.preventImageDrag}
+          class="w-full h-full object-contain ${
+            selected ? "opacity-100" : "opacity-80"
+          } group-hover:opacity-100 transition-opacity duration-200"
+        />
+      </div>
+      <div
+        class="text-xs font-bold text-white uppercase tracking-wider text-center leading-tight break-words"
+      >
+        ${map.name}
+      </div>
+      <div class="text-[10px] text-white/50 text-center normal-case">
+        ${translateText("custom_maps.card_details", {
+          width: map.width,
+          height: map.height,
+          nations: map.nations,
+        })}
+        ${
+          map.author
+            ? html`<br />${translateText("custom_maps.by", {
+                  author: map.author,
+                })}`
+            : null
+        }
+      </div>
+    </button>`;
+  }
+
+  private renderCustomTab() {
+    const refresh = html`<button
+      type="button"
+      class="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider text-white/70 hover:text-white bg-white/5 border border-white/10"
+      @click=${() => this.onRefreshCustomMaps?.()}
+    >
+      ${translateText("custom_maps.refresh")}
+    </button>`;
+    const editor = html`<a
+      class="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider text-white/70 hover:text-white bg-white/5 border border-white/10"
+      href="#scenario-editor"
+    >
+      ${translateText("custom_maps.open_editor")}
+    </a>`;
+    let body;
+    if (this.customMapsError) {
+      body = html`<p class="text-sm text-red-400">
+        ${translateText("custom_maps.load_failed")}
+      </p>`;
+    } else if (this.customMaps === null) {
+      body = html`<p class="text-sm text-white/50">
+        ${translateText("common.loading")}
+      </p>`;
+    } else if (this.customMaps.length === 0) {
+      body = html`<p class="text-sm text-white/50">
+        ${translateText("custom_maps.none")}
+      </p>`;
+    } else {
+      body = html`<div
+        class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"
+      >
+        ${repeat(
+          this.customMaps,
+          (m) => m.id,
+          (m) => this.renderCustomMapCard(m),
+        )}
+      </div>`;
+    }
+    return html`<div class="w-full space-y-4">
+      <div class="flex items-center justify-between gap-2">
+        ${this.renderSectionHeading(translateText("map_categories.custom"))}
+        <div class="flex gap-2">${refresh}${editor}</div>
+      </div>
+      ${body}
+    </div>`;
+  }
+
   private renderActiveTab() {
     switch (this.activeTab) {
+      case "custom":
+        return this.renderCustomTab();
       case "all":
         return this.renderAllTab();
       case "atlas":
@@ -343,7 +455,9 @@ export class MapPicker extends LitElement {
               : html`<div
                     role="tablist"
                     aria-label="${translateText("map.map")}"
-                    class="flex-1 grid grid-cols-4 gap-1 sm:gap-2 rounded-xl border border-white/10 bg-black/20 p-1"
+                    class="flex-1 grid ${
+                      this.onSelectCustomMap ? "grid-cols-5" : "grid-cols-4"
+                    } gap-1 sm:gap-2 rounded-xl border border-white/10 bg-black/20 p-1"
                   >
                     ${this.renderTabButton(
                       "featured",
@@ -355,6 +469,14 @@ export class MapPicker extends LitElement {
                       "favorites",
                       translateText("map.favorites"),
                     )}
+                    ${
+                      this.onSelectCustomMap
+                        ? this.renderTabButton(
+                            "custom",
+                            translateText("map.custom_maps"),
+                          )
+                        : null
+                    }
                   </div>
                   ${this.activeTab === "all" ? this.renderExpandToggle() : null}`
           }

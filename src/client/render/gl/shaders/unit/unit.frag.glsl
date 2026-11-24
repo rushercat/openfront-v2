@@ -42,6 +42,8 @@ const float FLAG_TRADE_FRIENDLY = 3.0;
 const float FLAG_RETREATING     = 4.0;
 const float FLAG_FLICKER_UNTARGETABLE = 5.0; // nuke out of SAM range — dimmed
 const float FLAG_TRADE_SELF     = 6.0;
+const float FLAG_SUB_SURFACING  = 7.0; // nuclear submarine coming up — blinks white
+const float FLAG_SUB_READY      = 8.0; // surfaced, ready to fire — red
 
 // Flicker hot colors: red → orange → yellow → white
 const vec3 FLICKER_COLORS[4] = vec3[4](
@@ -157,7 +159,7 @@ void main() {
   }
 
   // train cosmetic: the train sprites (engine, carriage, loaded carriage) are
-  // the last three atlas columns. The engine is drawn entirely in the border
+  // the three atlas columns before the aircraft. The engine is drawn entirely in the border
   // band and the carriages are a border-band frame around a territory-band
   // fill, so recolor both bands — the border band darkened — to keep that
   // engine/frame/fill structure while the whole train takes the effect.
@@ -165,7 +167,8 @@ void main() {
   // 5×5 train sprites fill only the middle of the 13-tile unit cell, so an
   // icon-space gradient would show a sliver of the palette per car, whereas a
   // world-space one runs along the whole train.
-  if (vAtlasCol > float(TRAIN_FIRST_COL) - 0.1) {
+  if (vAtlasCol > float(TRAIN_FIRST_COL) - 0.1 &&
+      vAtlasCol < float(AIRCRAFT_FIRST_COL) - 0.1) {
     vec3 effectRGB;
     float diag = vWorldPos.x + vWorldPos.y;
     if (spriteEffectColor(TRAIN_EFFECT_ROW_BASE, int(vOwnerID + 0.5), diag, false, effectRGB)) {
@@ -182,6 +185,14 @@ void main() {
   float retreatBlink = 0.0;
   if (abs(vFlags - FLAG_ANGRY) < 0.1) {
     // Angry: the outer ring (180) and center (100) go red via territoryColor
+    territoryColor = uAngryColor;
+  } else if (abs(vFlags - FLAG_SUB_SURFACING) < 0.1) {
+    // Surfacing submarine: blink white about twice a second.
+    float blink = step(0.5, fract(uTick * 0.2));
+    territoryColor = mix(territoryColor, vec3(1.0), blink * 0.85);
+    borderColor = mix(borderColor, vec3(1.0), blink * 0.5);
+  } else if (abs(vFlags - FLAG_SUB_READY) < 0.1) {
+    // Surfaced and ready to fire: red like an attacking warship.
     territoryColor = uAngryColor;
   } else if (abs(vFlags - FLAG_RETREATING) < 0.1) {
     // Retreating: slowly blink the center (100 band) black so the ship reads as fleeing

@@ -38,15 +38,23 @@ import {
   blastHitsFriendlyLand,
   enemyLandBlastCoverage,
   isNukeAlreadyLandingNear,
+  isPathInterceptable,
   isTrajectoryInterceptableBySam,
+  nukeTrajectory,
   NukeType,
   planSamSalvo,
+  planSaturationStrike,
+  SalvoLaunch,
+  SaturationStyle,
   siloToUpgradeForSalvo,
+  structureClusterCentres,
+  structureNukeValue,
 } from "./NationNukePlanning";
 import {
   findRunawayLeader,
   isSaveUpWithinReach,
   randTerritoryTileArray,
+  aiUnitDisabled,
 } from "./NationUtils";
 
 /**
@@ -85,6 +93,52 @@ const STRIKE_SPAWN_TICKS = 10;
 
 /** Hard & Impossible: ticks after a launch until that nuke's perceived price is back down to its real price */
 const NUKE_PRICE_MEMORY_TICKS = 3000;
+
+/**
+ * How each difficulty gets a nuke past SAMs: Easy doesn't try (it leaves
+ * spots it sees guarded alone), Medium sends up to two decoys ahead of the
+ * payload, Hard times a full salvo against every missile the SAMs could have,
+ * Impossible also reads which SAMs are still reloading. Every salvo is
+ * played through first: it only flies if the payload gets through.
+ */
+const SATURATION: Record<Difficulty, SaturationStyle | null> = {
+  [Difficulty.Easy]: null,
+  // Medium plays its salvo through too: a nation only fires bombs it
+  // knows will get through.
+  [Difficulty.Medium]: {
+    timed: true,
+    assumeReloaded: true,
+    spareDecoys: 0,
+    maxDecoys: 2,
+  },
+  [Difficulty.Hard]: {
+    timed: true,
+    assumeReloaded: true,
+    spareDecoys: 1,
+    maxDecoys: 8,
+  },
+  [Difficulty.Impossible]: {
+    timed: true,
+    assumeReloaded: false,
+    spareDecoys: 1,
+    maxDecoys: 12,
+  },
+};
+
+/** Medium: SAMs this close to a spot make it worth decoys. */
+const MEDIUM_SAM_DANGER_RANGE = 50;
+
+/** Tile score cost of each decoy a SAM-guarded spot needs, so unguarded spots of similar value win. */
+const DECOY_SCORE_COST = 15_000;
+
+/** SAM-guarded spots a nation plans a salvo for per nuke type and turn, best first; planning plays the interception through. */
+const MAX_SALVO_PLANS = 8;
+
+interface NukePlan {
+  tile: TileRef;
+  /** Decoys then payload, or null for a single bomb. */
+  salvo: SalvoLaunch[] | null;
+}
 
 interface Strike {
   target: Player;
@@ -173,12 +227,17 @@ export class NationNukeBehavior {
 
   maybeSendNuke() {
     const silos = this.player.units(UnitType.MissileSilo);
-    const config = this.game.config();
+    // A surfaced nuclear submarine launches like a silo (Player.nukeSpawn
+    // picks the nearest launcher), so a nation without silos fires from it.
+    const surfacedSubmarine = this.player
+      .units(UnitType.NuclearSubmarine)
+      .some((sub) => sub.submarineState()?.mode === "surfaced");
     if (
-      silos.length === 0 ||
-      config.isUnitDisabled(UnitType.MissileSilo) ||
-      (config.isUnitDisabled(UnitType.AtomBomb) &&
-        config.isUnitDisabled(UnitType.HydrogenBomb))
+      (silos.length === 0 && !surfacedSubmarine) ||
+      (aiUnitDisabled(this.game, this.player, UnitType.MissileSilo) &&
+        !surfacedSubmarine) ||
+      (aiUnitDisabled(this.game, this.player, UnitType.AtomBomb) &&
+        aiUnitDisabled(this.game, this.player, UnitType.HydrogenBomb))
     ) {
       return;
     }
@@ -218,13 +277,24 @@ export class NationNukeBehavior {
       nukeTarget,
       numRandomTiles,
     );
-    const candidates = new Set(
-      randomTiles.concat(structures.map((u) => u.tile())),
-    );
+    const baseCandidates = randomTiles.concat(structures.map((u) => u.tile()));
     this.removeOldNukeEvents();
 
     for (const nukeType of nukeTypes) {
-      const tile = this.findBestNukeTile(
+      // Above Easy, also aim at the centres of structure clusters to catch as much as possible at once
+      const candidates = new Set(
+        difficulty === Difficulty.Easy
+          ? baseCandidates
+          : baseCandidates.concat(
+              structureClusterCentres(
+                this.game,
+                nukeTarget,
+                structures,
+                this.game.config().nukeMagnitudes(nukeType).outer,
+              ),
+            ),
+      );
+      const plan = this.findBestNukeTile(
         nukeType,
         nukeTarget,
         candidates,
@@ -232,8 +302,13 @@ export class NationNukeBehavior {
         structures,
         strike,
       );
-      if (tile !== null) {
-        this.sendNuke(tile, nukeType, nukeTarget);
+      if (plan !== null) {
+        const { tile, salvo } = plan;
+        if (salvo === null) {
+          this.sendNuke(tile, nukeType, nukeTarget);
+        } else {
+          this.sendSalvo(tile, salvo, nukeTarget);
+        }
         if (strike && this.followsUpStrikes()) {
           this.strikes.push({
             target: nukeTarget,
@@ -245,7 +320,13 @@ export class NationNukeBehavior {
         return;
       }
     }
-    if (difficulty === Difficulty.Impossible && !saving) {
+    // Nothing worth a nuke gets past their SAMs: take out a SAM first, as
+    // good players do (Hard and up).
+    if (
+      (difficulty === Difficulty.Hard ||
+        difficulty === Difficulty.Impossible) &&
+      !saving
+    ) {
       this.maybeDestroyEnemySam(nukeTarget);
     }
   }
@@ -257,7 +338,7 @@ export class NationNukeBehavior {
     const types: NukeType[] = [];
     if (
       !atomOnly &&
-      !config.isUnitDisabled(UnitType.HydrogenBomb) &&
+      !aiUnitDisabled(this.game, this.player, UnitType.HydrogenBomb) &&
       this.player.gold() >= this.getPerceivedNukeCost(UnitType.HydrogenBomb)
     ) {
       types.push(UnitType.HydrogenBomb);
@@ -266,7 +347,7 @@ export class NationNukeBehavior {
       (types.length === 0 ||
         difficulty === Difficulty.Hard ||
         difficulty === Difficulty.Impossible) &&
-      !config.isUnitDisabled(UnitType.AtomBomb) &&
+      !aiUnitDisabled(this.game, this.player, UnitType.AtomBomb) &&
       this.player.gold() >= this.getPerceivedNukeCost(UnitType.AtomBomb)
     ) {
       types.push(UnitType.AtomBomb);
@@ -281,10 +362,15 @@ export class NationNukeBehavior {
     silos: Unit[],
     structures: Unit[],
     strike: boolean,
-  ): TileRef | null {
+  ): NukePlan | null {
     const difficulty = this.game.config().gameConfig().difficulty;
     const range = this.game.config().nukeMagnitudes(nukeType).outer;
-    const scored: { tile: TileRef; score: number }[] = [];
+    const scored: {
+      tile: TileRef;
+      score: number;
+      value: number;
+      guarded: boolean;
+    }[] = [];
 
     outer: for (const tile of candidates) {
       // Cheap pre-filter, blastHitsFriendlyLand checks the whole blast of the winner
@@ -312,35 +398,108 @@ export class NationNukeBehavior {
         if (coverage < MIN_BLAST_COVERAGE[nukeType]) continue;
       }
 
-      // On Hard & Impossible, avoid trajectories that can be intercepted by enemy SAMs
-      if (
-        (difficulty === Difficulty.Hard ||
-          difficulty === Difficulty.Impossible) &&
-        isTrajectoryInterceptableBySam(this.game, this.player, spawnTile, tile)
-      ) {
-        continue;
-      }
-
       const value = this.nukeTileScore(tile, silos, structures, nukeType);
-      // Impossible only nukes spots with structure value, unless it's after the troops
-      if (
-        difficulty === Difficulty.Impossible && !strike ? value <= 0 : value < 0
-      ) {
-        continue;
-      }
+      if (!this.isWorthNuking(value, strike)) continue;
       scored.push({
         tile,
         score: value + coverage * FULL_BLAST_COVERAGE_VALUE,
+        value,
+        guarded: this.isGuardedBySam(tile, spawnTile, structures),
       });
     }
     // Stable sort: on ties the earlier candidate wins
     scored.sort((a, b) => b.score - a.score);
     const margin = strike ? STRIKE_BORDER_MARGIN : 0;
-    const best = scored.find(
-      ({ tile }) =>
-        !blastHitsFriendlyLand(this.game, this.player, tile, nukeType, margin),
-    );
-    return best?.tile ?? null;
+    const style = SATURATION[difficulty];
+    const budget =
+      this.player.gold() -
+      this.getPerceivedNukeCost(nukeType) +
+      this.cost(nukeType);
+    let best: (NukePlan & { score: number }) | null = null;
+    let salvoPlans = 0;
+    for (const candidate of scored) {
+      // Decoys only lower a spot's score, so no later spot can beat the best one
+      if (best !== null && candidate.score <= best.score) break;
+      const { tile } = candidate;
+      if (
+        blastHitsFriendlyLand(this.game, this.player, tile, nukeType, margin)
+      ) {
+        continue;
+      }
+      if (!candidate.guarded) {
+        best = { tile, salvo: null, score: candidate.score };
+        continue;
+      }
+      // Get past the SAMs with decoys, if it's worth the gold
+      if (style === null || salvoPlans >= MAX_SALVO_PLANS) continue;
+      salvoPlans++;
+      const salvo = planSaturationStrike(
+        this.game,
+        this.player,
+        tile,
+        nukeType,
+        budget,
+        style,
+      );
+      if (salvo === null) continue;
+      const decoyCost = (salvo.length - 1) * DECOY_SCORE_COST;
+      if (!this.isWorthNuking(candidate.value - decoyCost, strike)) continue;
+      const score = candidate.score - decoyCost;
+      if (best === null || score > best.score) {
+        best = { tile, salvo: salvo.length > 1 ? salvo : null, score };
+      }
+    }
+    return best === null ? null : { tile: best.tile, salvo: best.salvo };
+  }
+
+  /** Impossible only nukes spots with structure value, unless it's after the troops. */
+  private isWorthNuking(value: number, strike: boolean): boolean {
+    const difficulty = this.game.config().gameConfig().difficulty;
+    return difficulty === Difficulty.Impossible && !strike
+      ? value > 0
+      : value >= 0;
+  }
+
+  /**
+   * Whether enemy SAMs (launchers or carriers) could shoot down a bomb at
+   * tile; a guarded spot is only nuked with a salvo planned to get through.
+   * Easy only sees the target's SAMs close to it, Medium & Hard check the
+   * whole trajectory against every SAM, Impossible also reads which SAMs are
+   * still reloading and fires while they can't answer.
+   */
+  private isGuardedBySam(
+    tile: TileRef,
+    spawnTile: TileRef,
+    structures: Unit[],
+  ): boolean {
+    const difficulty = this.game.config().gameConfig().difficulty;
+    switch (difficulty) {
+      case Difficulty.Easy: {
+        const near = euclDistFN(tile, MEDIUM_SAM_DANGER_RANGE, false);
+        return structures.some(
+          (unit) =>
+            unit.type() === UnitType.SAMLauncher &&
+            near(this.game, unit.tile()),
+        );
+      }
+      case Difficulty.Medium:
+      case Difficulty.Hard:
+        return isTrajectoryInterceptableBySam(
+          this.game,
+          this.player,
+          spawnTile,
+          tile,
+        );
+      case Difficulty.Impossible:
+        return isPathInterceptable(
+          this.game,
+          this.player,
+          nukeTrajectory(this.game, spawnTile, tile),
+          { useReloadState: true },
+        );
+      default:
+        assertNever(difficulty);
+    }
   }
 
   /** Who to nuke, and whether it's a strike: a nuke that softens a player up for our attack. */
@@ -582,19 +741,22 @@ export class NationNukeBehavior {
     }
   }
 
+  /** The bomb a strike waits for: the last one launched at its tile, the payload behind any decoys. */
   private findStrikeNuke(tile: TileRef): Unit | null {
+    let found: Unit | null = null;
     for (const nuke of this.player.units(
       UnitType.AtomBomb,
       UnitType.HydrogenBomb,
     )) {
       if (
         nuke.targetTile() === tile &&
-        !this.strikes.some((s) => s.nuke === nuke)
+        !this.strikes.some((s) => s.nuke === nuke) &&
+        (found === null || nuke.id() > found.id())
       ) {
-        return nuke;
+        found = nuke;
       }
     }
-    return null;
+    return found;
   }
 
   private ourTroopsAttacking(target: Player): number {
@@ -859,7 +1021,7 @@ export class NationNukeBehavior {
     }
 
     // If MIRVs are disabled, return the actual cost
-    if (this.game.config().isUnitDisabled(UnitType.MIRV)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.MIRV)) {
       return true;
     }
 
@@ -999,38 +1161,11 @@ export class NationNukeBehavior {
     const dist = euclDistFN(tile, magnitude.outer, false);
     let tileValue = targets
       .filter((unit) => dist(this.game, unit.tile()))
-      .map((unit): number => {
-        const level = unit.level();
-        switch (unit.type()) {
-          case UnitType.City:
-            return 25_000 * level;
-          case UnitType.DefensePost:
-            return 5_000 * level;
-          case UnitType.MissileSilo:
-            return 50_000 * level;
-          case UnitType.Port:
-            return 15_000 * level;
-          case UnitType.Factory:
-            return 15_000 * level;
-          default:
-            return 0;
-        }
-      })
+      .map(structureNukeValue)
       .reduce((prev, cur) => prev + cur, 0);
 
     const difficulty = this.game.config().gameConfig().difficulty;
-    // On Easy, ignore SAMs entirely.
-    // On Medium, apply a simple local SAM penalty.
-    // On Hard & Impossible we rely on trajectory-based interception checks instead. See maybeSendNuke().
-    if (difficulty === Difficulty.Medium) {
-      const dist50 = euclDistFN(tile, 50, false);
-      const hasSam = targets.some(
-        (unit) =>
-          unit.type() === UnitType.SAMLauncher &&
-          dist50(this.game, unit.tile()),
-      );
-      if (hasSam) return -1;
-    }
+    // SAMs guarding the spot are handled by decoys, see findBestNukeTile()
 
     // On Impossible difficulty and a hydrogen bomb, add value for SAMs that can be outranged
     if (
@@ -1115,9 +1250,31 @@ export class NationNukeBehavior {
     this.emojiBehavior.maybeSendEmoji(targetPlayer, EMOJI_NUKE);
   }
 
-  // On Impossible, when no spot is worth a nuke, overwhelm one of the target's SAMs with atom bombs
+  /**
+   * Atom bomb decoys that soak up the SAMs' missiles, then the payload. The
+   * decoys don't count as nukes we chose to send (they leave the perceived
+   * prices alone).
+   */
+  private sendSalvo(tile: TileRef, salvo: SalvoLaunch[], targetPlayer: Player) {
+    for (const decoy of salvo.slice(0, -1)) {
+      this.game.addExecution(
+        new NukeExecution(
+          decoy.type,
+          this.player,
+          tile,
+          null,
+          -1,
+          decoy.waitTicks,
+        ),
+      );
+    }
+    const payload = salvo[salvo.length - 1];
+    this.sendNuke(tile, payload.type, targetPlayer, payload.waitTicks);
+  }
+
+  // On Hard & Impossible, when no spot is worth a nuke, overwhelm one of the target's SAMs with atom bombs
   private maybeDestroyEnemySam(nukeTarget: Player): void {
-    if (this.game.config().isUnitDisabled(UnitType.AtomBomb)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.AtomBomb)) {
       return;
     }
 

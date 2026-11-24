@@ -1,4 +1,6 @@
 import { EventBus } from "@openfront/shared/EventBus";
+import { EventLogPanel } from "../chronicle/EventLogPanel";
+import { MatchChronicleController } from "../chronicle/MatchChronicleController";
 import { Controller } from "../Controller";
 import { AmbienceController } from "../controllers/AmbienceController";
 import { AttackingTroopsController } from "../controllers/AttackingTroopsController";
@@ -23,12 +25,14 @@ import { UserSettings } from "../UserSettings";
 import { GameView } from "../view";
 import { FrameProfiler } from "./FrameProfiler";
 import { ActionableEvents } from "./layers/ActionableEvents";
+import { AlertFeed } from "./layers/AlertFeed";
 import { AlertFrame } from "./layers/AlertFrame";
 import { AttacksDisplay } from "./layers/AttacksDisplay";
 import { BuildMenu } from "./layers/BuildMenu";
 import { ChatDisplay } from "./layers/ChatDisplay";
 import { ChatModal } from "./layers/ChatModal";
 import { ControlPanel } from "./layers/ControlPanel";
+import { DraftPanel } from "./layers/DraftPanel";
 import { EmojiTable } from "./layers/EmojiTable";
 import { EventsDisplay } from "./layers/EventsDisplay";
 import { GameLeftSidebar } from "./layers/GameLeftSidebar";
@@ -37,12 +41,15 @@ import { HeadsUpMessage } from "./layers/HeadsUpMessage";
 import { ImmunityTimer } from "./layers/ImmunityTimer";
 import { InGamePromo } from "./layers/InGamePromo";
 import { MainRadialMenu } from "./layers/MainRadialMenu";
+import { MapLens } from "./layers/MapLens";
+import { MissionPanel } from "./layers/MissionPanel";
 import { MultiTabModal } from "./layers/MultiTabModal";
 import { NewLobbyPrompt } from "./layers/NewLobbyPrompt";
 import { OnboardingOverlay } from "./layers/OnboardingOverlay";
 import { PerformanceOverlay } from "./layers/PerformanceOverlay";
 import { PlayerInfoOverlay } from "./layers/PlayerInfoOverlay";
 import { PlayerPanel } from "./layers/PlayerPanel";
+import { PoliticsPanel } from "./layers/PoliticsPanel";
 import { ReplayPanel } from "./layers/ReplayPanel";
 import { SettingsModal } from "./layers/SettingsModal";
 import { SpawnTimer } from "./layers/SpawnTimer";
@@ -50,6 +57,17 @@ import { TutorialPanel } from "./layers/TutorialPanel";
 import { UnitDisplay } from "./layers/UnitDisplay";
 import { WinModal } from "./layers/WinModal";
 import { loadAllSprites } from "./SpriteLoader";
+
+/** The page's `<tag>` element, or a new one appended to the body. */
+function hudElement<T extends HTMLElement>(
+  tag: string,
+  Ctor: new () => T,
+): T {
+  const existing = document.querySelector(tag);
+  if (existing instanceof Ctor) return existing;
+  existing?.remove();
+  return document.body.appendChild(new Ctor());
+}
 
 export function createRenderer(
   inputEl: HTMLElement,
@@ -307,6 +325,39 @@ export function createRenderer(
   immunityTimer.game = game;
   immunityTimer.eventBus = eventBus;
 
+  const politicsPanel = document.querySelector(
+    "politics-panel",
+  ) as PoliticsPanel;
+  if (!(politicsPanel instanceof PoliticsPanel)) {
+    console.error("politics panel not found");
+  }
+  politicsPanel.game = game;
+  politicsPanel.eventBus = eventBus;
+
+  // openfront v2 HUD pieces; created on the fly where index.html lacks them.
+  // The classes are used as values here on purpose: a type-only use would
+  // let the bundler drop their modules, and the elements would never be
+  // defined.
+  const alertFeed = hudElement("alert-feed", AlertFeed);
+  alertFeed.game = game;
+  alertFeed.eventBus = eventBus;
+
+  const mapLens = hudElement("map-lens", MapLens);
+  mapLens.game = game;
+  mapLens.eventBus = eventBus;
+  mapLens.view = view;
+
+  const missionPanel = hudElement("mission-panel", MissionPanel);
+  missionPanel.game = game;
+  missionPanel.eventBus = eventBus;
+
+  const draftPanel = document.querySelector("draft-panel") as DraftPanel;
+  if (!(draftPanel instanceof DraftPanel)) {
+    console.error("draft panel not found");
+  }
+  draftPanel.game = game;
+  draftPanel.eventBus = eventBus;
+
   const inGamePromo = document.querySelector("in-game-promo") as InGamePromo;
   if (!(inGamePromo instanceof InGamePromo)) {
     console.error("in-game promo not found");
@@ -335,7 +386,17 @@ export function createRenderer(
   onboardingOverlay.transformHandler = transformHandler;
   onboardingOverlay.uiState = uiState;
 
+  // The match chronicle behind the event log and the statistics after the game.
+  const chronicleController = new MatchChronicleController(game);
+  const eventLog = document.querySelector("event-log-panel");
+  if (!(eventLog instanceof EventLogPanel)) {
+    console.error("event log panel not found");
+  } else {
+    eventLog.setup(game, eventBus, chronicleController.chronicle);
+  }
+
   const layers: Controller[] = [
+    chronicleController,
     new WarshipSelectionController(game, eventBus, transformHandler, view),
     new BuildPreviewController(
       game,
@@ -369,6 +430,11 @@ export function createRenderer(
     ),
     spawnTimer,
     immunityTimer,
+    politicsPanel,
+    alertFeed,
+    mapLens,
+    missionPanel,
+    draftPanel,
     gameLeftSidebar,
     unitDisplay,
     gameRightSidebar,
@@ -396,6 +462,11 @@ export function createRenderer(
     buildMenu,
     spawnTimer,
     immunityTimer,
+    politicsPanel,
+    alertFeed,
+    mapLens,
+    missionPanel,
+    draftPanel,
     gameLeftSidebar,
     unitDisplay,
     gameRightSidebar,

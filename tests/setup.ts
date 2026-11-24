@@ -8,3 +8,8 @@ import "./domTeardown";
 // ServerEnv.gitCommit() throws when unset; the dev server sets GIT_COMMIT=DEV,
 // so tests exercising server code (e.g. the lobby feed) mirror that.
 process.env.GIT_COMMIT ??= "DEV";
+
+// openfront v2 disables public matches unless PUBLIC_MATCHES=1
+// (src/server/PublicMatches.ts). The lobby tests exercise the public queue,
+// so it is on here; PublicMatches.test.ts checks the private-only default.
+process.env.PUBLIC_MATCHES ??= "1";

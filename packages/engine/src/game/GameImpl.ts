@@ -19,6 +19,7 @@ import {
   Team,
   TeamGameSpawnAreas,
   TerrainType,
+  GameFeature,
   TerraNullius,
   Tick,
   Trios,
@@ -62,6 +63,7 @@ import {
 import { simpleHash } from "@openfront/engine-lib/Util";
 import { z } from "zod";
 import { EngineConfig } from "../configuration/EngineConfig";
+import { isFixedScenarioAlliance } from "../execution/HistoricalScenarioExecution";
 import {
   SharedWaterCache,
   SharedWaterCacheSnapshot,
@@ -93,7 +95,9 @@ import {
   Game,
   MutableAlliance,
   Player,
+  Politics,
   Unit,
+  Draft,
 } from "./Game";
 import { PlayerImpl } from "./PlayerImpl";
 import { RailNetwork } from "./RailNetwork";
@@ -172,6 +176,10 @@ export class GameImpl implements Game {
   private _nationMirvTargets = new Map<PlayerID, Tick>();
 
   private _isPaused: boolean = false;
+  // Not snapshotted: the PoliticsExecution registers itself on init/restore.
+  private _politics: Politics | null = null;
+  // Not snapshotted either: the DraftExecution registers itself.
+  private _draft: Draft | null = null;
   private _winner: Player | Team | null = null;
   private _waterManager: WaterManager;
   private _sharedWaterCache: SharedWaterCache;
@@ -557,6 +565,29 @@ export class GameImpl implements Game {
     this.addUpdate({ type: GameUpdateType.GamePaused, paused });
   }
 
+  politics(): Politics | null {
+    return this._politics;
+  }
+
+  setPolitics(politics: Politics | null): void {
+    this._politics = politics;
+  }
+
+  draft(): Draft | null {
+    return this._draft;
+  }
+
+  setDraft(draft: Draft | null): void {
+    this._draft = draft;
+  }
+
+  isFrozen(): boolean {
+    return (
+      (this._politics?.isFrozenAt(this._ticks) ?? false) ||
+      (this._draft?.isFrozenAt(this._ticks) ?? false)
+    );
+  }
+
   inSpawnPhase(): boolean {
     return this.startTick === null;
   }
@@ -626,9 +657,14 @@ export class GameImpl implements Game {
       this.viewResyncQueued = false;
       this.addViewResync();
     }
+    // A congress vote freezes the game: only executions that take part in
+    // it (or must never wait, like disconnect marks) run, and new ones wait.
+    // Decided once per tick, so every execution sees the same state.
+    const frozen = this.isFrozen();
     this.execs.forEach((e) => {
       if (
         (!this.inSpawnPhase() || e.activeDuringSpawnPhase()) &&
+        (!frozen || e.activeDuringFreeze?.() === true) &&
         e.isActive()
       ) {
         e.tick(this._ticks);
@@ -638,7 +674,10 @@ export class GameImpl implements Game {
       const inited: Execution[] = [];
       const unInited: Execution[] = [];
       for (const e of this.unInitExecs) {
-        if (!this.inSpawnPhase() || e.activeDuringSpawnPhase()) {
+        if (
+          (!this.inSpawnPhase() || e.activeDuringSpawnPhase()) &&
+          (!frozen || e.activeDuringFreeze?.() === true)
+        ) {
           e.init(this, this._ticks);
           inited.push(e);
         } else {
@@ -1082,6 +1121,16 @@ export class GameImpl implements Game {
     }
     const previousOwner = this.owner(tile) as TerraNullius | PlayerImpl;
     if (previousOwner.isPlayer()) {
+      // Land taken from another nation or human is restless for a while
+      // (UnrestExecution). Tribes' land isn't, and bots don't care.
+      if (
+        previousOwner !== owner &&
+        owner.type() !== PlayerType.Bot &&
+        previousOwner.type() !== PlayerType.Bot &&
+        !this.config().isFeatureDisabled(GameFeature.Unrest)
+      ) {
+        owner.setUnrest(owner.unrest() + 1);
+      }
       previousOwner._lastTileChange = this._ticks;
       previousOwner._tileChangeVersion++;
       previousOwner._tiles.delete(tile);
@@ -1154,6 +1203,10 @@ export class GameImpl implements Game {
       other = alliance.recipient();
     } else {
       other = alliance.requestor();
+    }
+    // A historical scenario's bloc alliances are fixed.
+    if (isFixedScenarioAlliance(this, breaker, other)) {
+      return;
     }
     if (!breaker.isAlliedWith(other)) {
       throw new Error(
@@ -1454,7 +1507,8 @@ export class GameImpl implements Game {
     if (
       type === UnitType.City ||
       type === UnitType.Port ||
-      type === UnitType.Factory
+      type === UnitType.Factory ||
+      type === UnitType.RailDepot
     ) {
       this._structureVersion++;
     }
@@ -1541,6 +1595,22 @@ export class GameImpl implements Game {
     }>;
   }
 
+  forEachNearbyUnit(
+    tile: TileRef,
+    searchRange: number,
+    types: readonly UnitType[],
+    visit: (unit: Unit, distSquared: number) => void,
+    includeUnderConstruction?: boolean,
+  ): void {
+    this.unitGrid.forEachNearbyUnit(
+      tile,
+      searchRange,
+      types,
+      visit,
+      includeUnderConstruction,
+    );
+  }
+
   ref(x: number, y: number): TileRef {
     return this._map.ref(x, y);
   }
@@ -1567,6 +1637,9 @@ export class GameImpl implements Game {
   }
   waterVersion(): number {
     return this._map.waterVersion();
+  }
+  terrainVersion(): number {
+    return this._map.terrainVersion();
   }
   isValidCoord(x: number, y: number): boolean {
     return this._map.isValidCoord(x, y);

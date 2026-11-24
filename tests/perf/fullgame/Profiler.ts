@@ -90,6 +90,9 @@ export class ExecutionProfiler {
       tickMs: number;
     }
   >();
+  /** Single init/tick calls over SLOW_CALL_MS: what a spike tick was spent on. */
+  readonly slowCalls: { name: string; ms: number }[] = [];
+  static readonly SLOW_CALL_MS = 15;
 
   attach(game: Game): void {
     const original = game.addExecution.bind(game);
@@ -118,14 +121,22 @@ export class ExecutionProfiler {
     e.init = (mg: Game, ticks: number) => {
       const start = performance.now();
       origInit(mg, ticks);
-      stats.initMs += performance.now() - start;
+      const ms = performance.now() - start;
+      stats.initMs += ms;
       stats.initCalls++;
+      if (ms >= ExecutionProfiler.SLOW_CALL_MS) {
+        this.slowCalls.push({ name: `${e.constructor.name}.init`, ms });
+      }
     };
     e.tick = (ticks: number) => {
       const start = performance.now();
       origTick(ticks);
-      stats.tickMs += performance.now() - start;
+      const ms = performance.now() - start;
+      stats.tickMs += ms;
       stats.tickCalls++;
+      if (ms >= ExecutionProfiler.SLOW_CALL_MS) {
+        this.slowCalls.push({ name: e.constructor.name, ms });
+      }
     };
   }
 

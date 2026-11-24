@@ -61,6 +61,9 @@ describe("TrainStation", () => {
       tile: vi.fn().mockReturnValue({ x: 0, y: 0 }),
       type: vi.fn(),
       isActive: vi.fn().mockReturnValue(true),
+      hasHealth: vi.fn().mockReturnValue(true),
+      // Full health of a level 1 City/Port (STRUCTURE_BASE_HEALTH).
+      health: vi.fn().mockReturnValue(300),
     } as any;
 
     trainExecution = {
@@ -78,6 +81,16 @@ describe("TrainStation", () => {
     station.onTrainStop(trainExecution);
 
     expect(unit.owner().addGold).toHaveBeenCalledWith(1000n, unit.tile());
+  });
+
+  it("a damaged station pays out in proportion to its health", () => {
+    unit.type.mockReturnValue(UnitType.City);
+    unit.health.mockReturnValue(150); // half of a level 1 city's 300
+    const station = new TrainStation(game, unit);
+
+    station.onTrainStop(trainExecution);
+
+    expect(unit.owner().addGold).toHaveBeenCalledWith(500n, unit.tile());
   });
 
   it("handles allied trade", () => {
@@ -235,17 +248,17 @@ describe("EngineConfig.trainGold trade stop penalty", () => {
 
   it("returns full base gold within free window (stops 0-9)", () => {
     // first 10 stops (0-9) are free — no penalty
-    expect(config.trainGold("self", 0, mockPlayer)).toBe(10_000n);
-    expect(config.trainGold("self", 9, mockPlayer)).toBe(10_000n);
+    expect(config.trainGold("self", 0, mockPlayer)).toBe(15_000n);
+    expect(config.trainGold("self", 9, mockPlayer)).toBe(15_000n);
   });
 
   it("reduces gold by 5k per stop after the free window", () => {
-    // stop 10: effective = 10-9 = 1 -> 10k - 5k = 5k
-    expect(config.trainGold("self", 10, mockPlayer)).toBe(5_000n);
+    // stop 10: effective = 10-9 = 1 -> 15k - 5k = 10k
+    expect(config.trainGold("self", 10, mockPlayer)).toBe(10_000n);
   });
 
   it("floors at 5k when penalty exceeds base gold", () => {
-    // stop 12: effective = 3 -> 10k - 15k -> floor at 5k
+    // stop 12: effective = 3 -> 15k - 15k -> floor at 5k
     expect(config.trainGold("self", 12, mockPlayer)).toBe(5_000n);
   });
 

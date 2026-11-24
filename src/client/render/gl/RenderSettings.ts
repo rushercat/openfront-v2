@@ -232,6 +232,9 @@ export interface RenderSettings {
     progressBarW: number;
     progressBarH: number;
     progressBarOffsetY: number;
+    /** Health bar of a damaged structure: progress-bar sized, under the icon
+     *  (below the construction bar). Only drawn while it is damaged. */
+    structureHealthBarOffsetY: number;
     borderWidth: number;
     threshold1: number;
     threshold2: number;

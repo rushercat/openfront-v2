@@ -23,6 +23,7 @@ import {
 import { logger } from "./Logger";
 import { MapPlaylist } from "./MapPlaylist";
 import { startPolling } from "./PollingLoop";
+import { publicMatchesEnabled } from "./PublicMatches";
 import { ServerEnv } from "./ServerEnv";
 
 export interface MasterLobbyServiceOptions {
@@ -194,6 +195,12 @@ export class MasterLobbyService {
   // recentMaps (what the site just played) is not yet fed to the playlist —
   // its no-consecutive-repeat rule stays per server for now.
   private async handleCoordinatorCreate(msg: CoordinatorCreateGame) {
+    if (!publicMatchesEnabled()) {
+      this.log.info(
+        `refusing coordinator createGame (${msg.publicGameType}): public matches are disabled`,
+      );
+      return;
+    }
     if (!this.active || !this.started) {
       this.log.info(
         `refusing coordinator createGame (${msg.publicGameType}): ${
@@ -430,6 +437,9 @@ export class MasterLobbyService {
   }
 
   private async maybeScheduleLobby() {
+    // Private matches only (PublicMatches.ts).
+    if (!publicMatchesEnabled()) return;
+
     // Coordinated: the site's queue depth and countdowns are the
     // coordinator's; adding our own here would double-schedule.
     if (this.isCoordinated()) return;

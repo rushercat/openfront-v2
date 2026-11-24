@@ -79,6 +79,10 @@ describe("TradeShipExecution", () => {
       isActive: vi.fn(() => true),
       isUnderConstruction: vi.fn(() => false),
       isMarkedForDeletion: vi.fn(() => false),
+      type: vi.fn(() => UnitType.Port),
+      level: vi.fn(() => 1),
+      hasHealth: vi.fn(() => true),
+      health: vi.fn(() => 300),
     } as any;
 
     piratePort2 = {
@@ -88,6 +92,10 @@ describe("TradeShipExecution", () => {
       isActive: vi.fn(() => true),
       isUnderConstruction: vi.fn(() => false),
       isMarkedForDeletion: vi.fn(() => false),
+      type: vi.fn(() => UnitType.Port),
+      level: vi.fn(() => 1),
+      hasHealth: vi.fn(() => true),
+      health: vi.fn(() => 300),
     } as any;
 
     srcPort = {
@@ -97,6 +105,10 @@ describe("TradeShipExecution", () => {
       isActive: vi.fn(() => true),
       isUnderConstruction: vi.fn(() => false),
       isMarkedForDeletion: vi.fn(() => false),
+      type: vi.fn(() => UnitType.Port),
+      level: vi.fn(() => 1),
+      hasHealth: vi.fn(() => true),
+      health: vi.fn(() => 300),
     } as any;
 
     dstPort = {
@@ -106,6 +118,10 @@ describe("TradeShipExecution", () => {
       isActive: vi.fn(() => true),
       isUnderConstruction: vi.fn(() => false),
       isMarkedForDeletion: vi.fn(() => false),
+      type: vi.fn(() => UnitType.Port),
+      level: vi.fn(() => 1),
+      hasHealth: vi.fn(() => true),
+      health: vi.fn(() => 300),
     } as any;
 
     tradeShip = {

@@ -180,7 +180,14 @@ export class GameMapImpl implements GameMap {
     return mask !== null && (mask[ref >>> 3] & (1 << (ref & 7))) !== 0;
   }
 
+  private terrainVersion_ = 0;
+  terrainVersion(): number {
+    return this.terrainVersion_;
+  }
+
   private noteTerrainEdit(ref: TileRef): void {
+    // Every terrain write comes through here first.
+    this.terrainVersion_++;
     const mask = (this.editedMask ??= new Uint8Array(
       (this.terrain.length + 7) >>> 3,
     ));

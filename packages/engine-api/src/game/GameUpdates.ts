@@ -1,4 +1,5 @@
 import { AllPlayersStats, ClientID, Winner } from "../Schemas";
+import type { DraftViewState } from "./Draft";
 import { TileRef } from "./GameMap";
 import {
   EmojiMessage,
@@ -10,6 +11,7 @@ import {
   PlayerID,
   PlayerType,
   SamLauncherState,
+  SubmarineState,
   Team,
   Tick,
   TrainType,
@@ -17,6 +19,8 @@ import {
   UnitType,
   WarshipState,
 } from "./GameTypes";
+import type { MissionsViewState } from "./Missions";
+import type { PoliticsViewState } from "./Politics";
 
 export interface GameUpdateViewData {
   tick: number;
@@ -124,6 +128,9 @@ export enum GameUpdateType {
   SpawnPhaseEnd,
   GamePaused,
   DonateEvent,
+  Politics,
+  Draft,
+  Missions,
 }
 
 export type GameUpdate =
@@ -149,7 +156,28 @@ export type GameUpdate =
   | EmbargoUpdate
   | SpawnPhaseEndUpdate
   | GamePausedUpdate
-  | DonateEventUpdate;
+  | DonateEventUpdate
+  | PoliticsUpdate
+  | DraftUpdate
+  | MissionsUpdate;
+
+/** Scenario missions and their progress (sent when they change). */
+export interface MissionsUpdate {
+  type: GameUpdateType.Missions;
+  state: MissionsViewState;
+}
+
+/** The draft as it stands (sent when it changes). */
+export interface DraftUpdate {
+  type: GameUpdateType.Draft;
+  state: DraftViewState;
+}
+
+/** The world congress as it stands (sent when it changes). */
+export interface PoliticsUpdate {
+  type: GameUpdateType.Politics;
+  state: PoliticsViewState;
+}
 
 export interface BonusEventUpdate {
   type: GameUpdateType.BonusEvent;
@@ -221,6 +249,7 @@ export interface UnitUpdate {
   trainType?: TrainType; // Only for trains
   loaded?: boolean; // Only for trains
   samUpgrade?: SamLauncherState;
+  submarineState?: SubmarineState; // Only for nuclear submarines
 }
 
 export interface AttackUpdate {
@@ -290,6 +319,8 @@ export interface PlayerUpdate {
   isLobbyCreator?: boolean;
   /** Scenario nations: a human may be assigned this one. */
   playable?: boolean;
+  /** Freshly conquered land, percent of the player's land (unrest). */
+  unrestPercent?: number;
 }
 
 export interface AllianceView {

@@ -151,7 +151,7 @@ function generateUniqueNationName(
   return `${baseName} ${counter}`;
 }
 
-function generateNationName(random: PseudoRandom): string {
+export function generateNationName(random: PseudoRandom): string {
   const template = NAME_TEMPLATES[random.nextInt(0, NAME_TEMPLATES.length)];
   const noun = NOUNS[random.nextInt(0, NOUNS.length)];
 

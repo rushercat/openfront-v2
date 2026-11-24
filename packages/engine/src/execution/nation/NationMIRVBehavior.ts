@@ -26,7 +26,7 @@ import {
   NationEmojiBehavior,
   respondToMIRV,
 } from "./NationEmojiBehavior";
-import { randTerritoryTileArray } from "./NationUtils";
+import { randTerritoryTileArray, aiUnitDisabled } from "./NationUtils";
 
 // 30 seconds at 10 ticks/second
 const MIRV_COOLDOWN_TICKS = 300;
@@ -251,7 +251,7 @@ export class NationMIRVBehavior {
 
   considerMIRV(): boolean {
     if (this.player === null) throw new Error("not initialized");
-    if (this.game.config().isUnitDisabled(UnitType.MIRV)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.MIRV)) {
       return false;
     }
     if (this.player.units(UnitType.MissileSilo).length === 0) {

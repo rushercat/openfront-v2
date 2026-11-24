@@ -9,6 +9,12 @@ import { GameMapLoader, MapData } from "./GameMapLoader";
 export class FetchGameMapLoader implements GameMapLoader {
   private maps: Map<GameMapId, MapData>;
   private custom: MapData | null = null;
+  private customKey: string | null = null;
+
+  /** What setCustomMap last loaded, as its caller named it. */
+  public loadedCustomMapKey(): string | null {
+    return this.custom === null ? null : this.customKey;
+  }
 
   public constructor(
     private readonly pathResolver: string | ((path: string) => string),
@@ -22,7 +28,14 @@ export class FetchGameMapLoader implements GameMapLoader {
    * next bundle. Each load gets its own copy of a file: a game takes over
    * the files it loads, and a worker is sent them by transfer.
    */
-  public setCustomMap(files: MapFiles, webpPath: string): void {
+  public setCustomMap(
+    files: MapFiles,
+    webpPath: string,
+    // Names what was loaded (an uploaded custom map's id and version), so a
+    // caller can tell whether it is still the loaded one.
+    key: string | null = null,
+  ): void {
+    this.customKey = key;
     const copy = (bin: Uint8Array | undefined) => async () => {
       if (bin === undefined) throw new Error("the scenario lacks a map file");
       return bin.slice();

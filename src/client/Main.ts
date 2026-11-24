@@ -228,6 +228,8 @@ declare global {
   interface Window {
     turnstile?: TurnstileApi;
     adsEnabled: boolean;
+    /** openfront v2: set in index.html; no ads or third-party scripts. */
+    __noAds?: boolean;
     gtag?: (...args: any[]) => void;
     PageOS: {
       session: {
@@ -900,8 +902,9 @@ class Client {
       }
       const isAdFree =
         userMeResponse !== false && userMeResponse.player?.adfree === true;
-      window.adsEnabled =
-        !isAdFree && !gamePortal.isOnGamePortal() && !isDesktopShell();
+      // openfront v2: ads are off for everyone (no Playwire, no Admiral).
+      void isAdFree;
+      window.adsEnabled = false;
       syncHashedEmail(userMeResponse, window.adsEnabled).catch((e) =>
         console.warn("Hashed email sync failed", e),
       );

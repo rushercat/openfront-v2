@@ -32,6 +32,9 @@ import type {
 } from "../snapshot/SnapshotContext";
 import { FlatBinaryHeap } from "./utils/FlatBinaryHeap"; // adjust path if needed
 
+/** Geneva convention: tiles this close to a city, port or capital stay. */
+const GENEVA_RANGE = 6;
+
 const malusForRetreat = 25;
 export class AttackExecution implements Execution {
   private active: boolean = true;
@@ -305,6 +308,13 @@ export class AttackExecution implements Execution {
       return;
     }
 
+    // A decree (ceasefire, safe zone, neutrality) now forbids this attack.
+    const politics = this.mg.politics();
+    if (targetPlayer && politics?.forbidsAttack(this._owner, targetPlayer)) {
+      this.retreat();
+      return;
+    }
+
     const borderSize = this.attack.borderSize() + this.random.nextInt(0, 5);
     // Each tile consumes a fraction of the tick; conquer until it is spent.
     let tickBudget = 1;
@@ -342,12 +352,36 @@ export class AttackExecution implements Execution {
       ) {
         continue;
       }
+      // Geneva convention: the land around cities and ports stays.
+      if (
+        targetPlayer &&
+        politics !== null &&
+        politics.protectsTile(this._owner, tileToConquer, GENEVA_RANGE)
+      ) {
+        continue;
+      }
       this.addNeighbors(tileToConquer);
-      const { attackerTroopLoss, defenderTroopLoss, tickFraction } = this.mg
+      const logic = this.mg
         .config()
         .attackLogic(
           this.attackLogicInput(troopCount, tileToConquer, borderSize),
         );
+      let { attackerTroopLoss, tickFraction } = logic;
+      const { defenderTroopLoss } = logic;
+      if (politics !== null) {
+        attackerTroopLoss *= politics.attackLossFactor(
+          this._owner,
+          targetPlayer ?? null,
+        );
+        tickFraction /= politics.attackSpeedFactor();
+      }
+      const draft = this.mg.draft();
+      if (draft !== null) {
+        attackerTroopLoss *= draft.attackLossFactor(
+          this._owner,
+          targetPlayer ?? null,
+        );
+      }
       tickBudget -= tickFraction;
       troopCount -= attackerTroopLoss;
       this.attack.setTroops(troopCount);
@@ -355,6 +389,9 @@ export class AttackExecution implements Execution {
         targetPlayer.removeTroops(defenderTroopLoss);
       }
       this._owner.conquer(tileToConquer);
+      if (targetPlayer && politics !== null) {
+        politics.onConquer(this._owner, targetPlayer);
+      }
       this.handleDeadDefender();
     }
   }
@@ -369,14 +406,27 @@ export class AttackExecution implements Execution {
     // (active, not under construction, within range), without building a
     // result array per conquered tile — this runs for every tile of every
     // attack on the map.
+    // A defender's tank defends the land around it like a defense post.
     const defenderHasDefensePost =
       defender !== null &&
-      this.mg.hasUnitNearby(
+      (this.mg.hasUnitNearby(
         tile,
         this.mg.config().defensePostRange(),
         UnitType.DefensePost,
         defender.id(),
-      );
+      ) ||
+        this.mg.hasUnitNearby(
+          tile,
+          this.mg.config().tankDefenseRange(),
+          UnitType.Tank,
+          defender.id(),
+        ) ||
+        this.mg.hasUnitNearby(
+          tile,
+          this.mg.config().capitalDefenseRange(),
+          UnitType.Capital,
+          defender.id(),
+        ));
     return {
       terrain: this.map.terrainType(tile),
       attackTroops,

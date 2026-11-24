@@ -61,6 +61,19 @@ export const DISABLED_UNIT_KEYS: Record<string, string> = {
   "Missile Silo": "unit_type.missile_silo",
   Warship: "unit_type.warship",
   Factory: "unit_type.factory",
+  "AA Defense": "unit_type.aa_defense",
+  Airfield: "unit_type.airfield",
+  "Fighter Jet": "unit_type.fighter_jet",
+  Bomber: "unit_type.bomber",
+  "Nuclear Submarine": "unit_type.nuclear_submarine",
+  "Rail Depot": "unit_type.rail_depot",
+  Tank: "unit_type.tank",
+  "Land Mine": "unit_type.land_mine",
+  "Sea Mine": "unit_type.sea_mine",
+  "Repair Station": "unit_type.repair_station",
+  "Aircraft Carrier": "unit_type.aircraft_carrier",
+  "Cruise Missile": "unit_type.cruise_missile",
+  "Transport Plane": "unit_type.transport_plane",
   "Atom Bomb": "unit_type.atom_bomb",
   "Hydrogen Bomb": "unit_type.hydrogen_bomb",
   MIRV: "unit_type.mirv",
@@ -291,11 +304,14 @@ export function disabledUnitsBox(
   className = "",
   variant: "boxed" | "flat" = "boxed",
 ): TemplateResult | null {
-  if (!c.disabledUnits?.length) return null;
-  const items = c.disabledUnits.map((u) => {
+  if (!c.disabledUnits?.length && !c.disabledFeatures?.length) return null;
+  const items = (c.disabledUnits ?? []).map((u) => {
     const key = DISABLED_UNIT_KEYS[u];
     return key ? translateText(key) : u;
   });
+  for (const feature of c.disabledFeatures ?? []) {
+    items.push(translateText(`game_feature.${feature}`));
+  }
   return renderModifierSection(true, items, className, variant === "flat");
 }
 

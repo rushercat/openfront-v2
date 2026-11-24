@@ -65,6 +65,16 @@ const goldCoinIcon = assetUrl("images/GoldCoinIcon.svg");
 const missileSiloIcon = assetUrl("images/MissileSiloIconWhite.svg");
 const portIcon = assetUrl("images/PortIcon.svg");
 const samLauncherIcon = assetUrl("images/SamLauncherIconWhite.svg");
+const aaDefenseIcon = assetUrl("images/AADefenseIconWhite.svg");
+const airfieldIcon = assetUrl("images/AirfieldIconWhite.svg");
+const fighterJetIcon = assetUrl("images/FighterJetIconWhite.svg");
+const bomberIcon = assetUrl("images/BomberIconWhite.svg");
+const railDepotIcon = assetUrl("images/RailDepotIconWhite.svg");
+const tankIcon = assetUrl("images/TankIconWhite.svg");
+const nuclearSubmarineIcon = assetUrl("images/NuclearSubmarineIconWhite.svg");
+const landMineIcon = assetUrl("images/LandMineIconWhite.svg");
+const seaMineIcon = assetUrl("images/SeaMineIconWhite.svg");
+const repairStationIcon = assetUrl("images/RepairStationIconWhite.svg");
 const soldierIcon = assetUrl("images/SoldierIcon.svg");
 
 function euclideanDistWorld(
@@ -78,6 +88,28 @@ function euclideanDistWorld(
   const dy = coord.y - y;
   return Math.sqrt(dx * dx + dy * dy);
 }
+
+/**
+ * Small units found right under the cursor, over land or sea: hovering one
+ * shows whose it is instead of the land below.
+ */
+const HOVER_UNIT_TYPES: readonly UnitType[] = [
+  UnitType.FighterJet,
+  UnitType.Bomber,
+  UnitType.TransportPlane,
+  UnitType.CruiseMissile,
+  UnitType.Tank,
+];
+/** Tiles from the cursor a HOVER_UNIT_TYPES unit counts as hovered. */
+const HOVER_UNIT_RADIUS = 6;
+/** Ships: shown for the nearest one within 50 tiles while over water. */
+const HOVER_SHIP_TYPES: readonly UnitType[] = [
+  UnitType.Warship,
+  UnitType.TradeShip,
+  UnitType.TransportShip,
+  UnitType.AircraftCarrier,
+  UnitType.NuclearSubmarine,
+];
 
 function distSortUnitWorld(coord: { x: number; y: number }, game: GameView) {
   return (a: UnitLike, b: UnitLike) => {
@@ -278,6 +310,19 @@ export class PlayerInfoOverlay extends LitElement implements Controller {
     const tile = this.game.ref(worldCoord.x, worldCoord.y);
     if (!tile) return;
 
+    // A plane, tank or cruise missile right under the cursor wins over the
+    // land below it: show whose it is, like a ship at sea.
+    const hoveredUnit = this.nearestVisibleUnit(
+      worldCoord,
+      HOVER_UNIT_TYPES,
+      HOVER_UNIT_RADIUS,
+    );
+    if (hoveredUnit !== null) {
+      this.unit = hoveredUnit;
+      this.setVisible(true);
+      return;
+    }
+
     const owner = this.game.owner(tile);
 
     if (owner && owner.isPlayer()) {
@@ -291,16 +336,39 @@ export class PlayerInfoOverlay extends LitElement implements Controller {
       this.refreshPlayerActions(this.player, tile);
       this.setVisible(true);
     } else if (!this.game.isLand(tile)) {
-      const units = this.game
-        .units(UnitType.Warship, UnitType.TradeShip, UnitType.TransportShip)
-        .filter((u) => euclideanDistWorld(worldCoord, u.tile(), this.game) < 50)
-        .sort(distSortUnitWorld(worldCoord, this.game));
-
-      if (units.length > 0) {
-        this.unit = units[0];
+      const ship = this.nearestVisibleUnit(worldCoord, HOVER_SHIP_TYPES, 50);
+      if (ship !== null) {
+        this.unit = ship;
         this.setVisible(true);
       }
     }
+  }
+
+  /**
+   * The nearest unit of `types` within `radius` tiles of the cursor that I
+   * may see (not another player's submerged submarine), or null.
+   */
+  private nearestVisibleUnit(
+    coord: { x: number; y: number },
+    types: readonly UnitType[],
+    radius: number,
+  ): UnitView | null {
+    const me = this.game.myPlayer();
+    const units = this.game
+      .units(...types)
+      .filter(
+        (u) =>
+          u.isActive() &&
+          !(
+            u.type() === UnitType.NuclearSubmarine &&
+            u.state.submerged &&
+            me !== null &&
+            u.owner() !== me
+          ) &&
+          euclideanDistWorld(coord, u.tile(), this.game) < radius,
+      )
+      .sort(distSortUnitWorld(coord, this.game));
+    return units[0] ?? null;
   }
 
   // Asks what I can do to the hovered player when it changes, and at most
@@ -781,7 +849,7 @@ export class PlayerInfoOverlay extends LitElement implements Controller {
             ${this.renderPlayerNameIcons(playerIcons)} ${betrayalHtml ?? ""}
             ${allianceHtml ?? ""}
           </div>
-          <div class="flex gap-0.5 lg:gap-1 items-center mt-0.5">
+          <div class="flex flex-wrap gap-0.5 lg:gap-1 items-center mt-0.5">
             ${this.displayUnitCount(player, UnitType.City, cityIcon)}
             ${this.displayUnitCount(player, UnitType.Factory, factoryIcon)}
             ${this.displayUnitCount(player, UnitType.Port, portIcon)}
@@ -796,6 +864,39 @@ export class PlayerInfoOverlay extends LitElement implements Controller {
               samLauncherIcon,
             )}
             ${this.displayUnitCount(player, UnitType.Warship, warshipIcon)}
+            ${this.displayUnitCount(player, UnitType.AADefense, aaDefenseIcon)}
+            ${this.displayUnitCount(player, UnitType.Airfield, airfieldIcon)}
+            ${this.displayUnitCount(
+              player,
+              UnitType.FighterJet,
+              fighterJetIcon,
+            )}
+            ${this.displayUnitCount(player, UnitType.Bomber, bomberIcon)}
+            ${this.displayUnitCount(player, UnitType.RailDepot, railDepotIcon)}
+            ${this.displayUnitCount(player, UnitType.Tank, tankIcon)}
+            ${this.displayUnitCount(
+              player,
+              UnitType.RepairStation,
+              repairStationIcon,
+            )}
+            ${
+              // Submarines and mines are secret: only their owner sees how many.
+              player === myPlayer
+                ? html`${this.displayUnitCount(
+                    player,
+                    UnitType.NuclearSubmarine,
+                    nuclearSubmarineIcon,
+                  )}${this.displayUnitCount(
+                    player,
+                    UnitType.LandMine,
+                    landMineIcon,
+                  )}${this.displayUnitCount(
+                    player,
+                    UnitType.SeaMine,
+                    seaMineIcon,
+                  )}`
+                : ""
+            }
           </div>
         </div>
         ${

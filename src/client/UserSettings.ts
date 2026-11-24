@@ -1,6 +1,8 @@
 import { Emoji, flattenedEmojiTable } from "@openfront/engine-api/Schemas";
 import { Cosmetics } from "@openfront/shared/CosmeticSchemas";
 import { PlayerPattern } from "@openfront/shared/WireSchemas";
+// FramePacer.ts imports nothing either, so this adds no cycle.
+import { DEFAULT_MAX_FPS, MAX_FPS_OPTIONS } from "./FramePacer";
 import {
   LOBBY_PRESETS_KEY,
   LobbyPreset,
@@ -39,6 +41,21 @@ export function getDefaultKeybinds(isMac: boolean): Record<string, string> {
     buildAtomBomb: "Digit8",
     buildHydrogenBomb: "Digit9",
     buildMIRV: "Digit0",
+    // The second hotbar row, shown while Shift is held.
+    buildAADefense: "Shift+Digit1",
+    buildAirfield: "Shift+Digit2",
+    buildFighterJet: "Shift+Digit3",
+    buildBomber: "Shift+Digit4",
+    buildRailDepot: "Shift+Digit5",
+    buildTank: "Shift+Digit6",
+    buildNuclearSubmarine: "Shift+Digit7",
+    buildLandMine: "Shift+Digit8",
+    buildSeaMine: "Shift+Digit9",
+    buildRepairStation: "Shift+Digit0",
+    buildAircraftCarrier: "Alt+Digit1",
+    buildCruiseMissile: "Alt+Digit2",
+    buildTransportPlane: "Alt+Digit3",
+    buildCapital: "Alt+Digit4",
     attackRatioDown: "KeyT",
     attackRatioUp: "KeyY",
     boatAttack: "KeyB",
@@ -75,6 +92,7 @@ export function getDefaultKeybinds(isMac: boolean): Record<string, string> {
     shiftKey: "ShiftLeft",
     resetGfx: "KeyR",
     selectAllWarships: "KeyX",
+    surfaceSubmarine: "KeyV",
     pauseGame: "KeyP",
     gameSpeedUp: "Period",
     gameSpeedDown: "Comma",
@@ -222,6 +240,8 @@ export const PATTERN_KEY = "territoryPattern";
 export const FLAG_KEY = "flag";
 export const CROWN_KEY = "crown";
 export const PERFORMANCE_OVERLAY_KEY = "settings.performanceOverlay";
+/** Most frames per second the map is drawn at; 0 = as fast as the display. */
+export const MAX_FPS_KEY = "settings.maxFps";
 // Kept out of the graphics overrides so picking a preset doesn't turn it back on.
 export const MAP_LAYERS_KEY = "settings.mapLayers";
 export const KEYBINDS_KEY = "settings.keybinds";
@@ -447,6 +467,17 @@ export class UserSettings {
 
   performanceOverlay() {
     return this.getBool(PERFORMANCE_OVERLAY_KEY, false);
+  }
+
+  /** The frame cap (FramePacer); 0 draws at the display's refresh rate. */
+  maxFps(): number {
+    const value = Math.round(this.getFloat(MAX_FPS_KEY, DEFAULT_MAX_FPS));
+    return MAX_FPS_OPTIONS.includes(value) ? value : DEFAULT_MAX_FPS;
+  }
+
+  setMaxFps(value: number): void {
+    if (!MAX_FPS_OPTIONS.includes(value)) return;
+    this.setFloat(MAX_FPS_KEY, value);
   }
 
   mapLayers() {

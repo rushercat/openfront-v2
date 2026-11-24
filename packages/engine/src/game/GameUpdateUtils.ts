@@ -64,6 +64,7 @@ export function diffPlayerUpdate(
     prev.lastDeleteUnitTick === next.lastDeleteUnitTick &&
     prev.isLobbyCreator === next.isLobbyCreator &&
     prev.playable === next.playable &&
+    prev.unrestPercent === next.unrestPercent &&
     numberArrayEqual(prev.allies, next.allies) &&
     numberArrayEqual(prev.targets, next.targets) &&
     stringArrayEqual(
@@ -132,6 +133,7 @@ export function diffPlayerUpdate(
   );
   setIfDifferent("isLobbyCreator", prev.isLobbyCreator === next.isLobbyCreator);
   setIfDifferent("playable", prev.playable === next.playable);
+  setIfDifferent("unrestPercent", prev.unrestPercent === next.unrestPercent);
   setIfDifferent("allies", numberArrayEqual(prev.allies, next.allies));
   setIfDifferent("targets", numberArrayEqual(prev.targets, next.targets));
   setIfDifferent(

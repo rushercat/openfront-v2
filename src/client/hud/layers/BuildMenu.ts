@@ -22,6 +22,7 @@ import {
 import { TransformHandler } from "../../TransformHandler";
 import {
   BuildUnitIntentEvent,
+  paradropTroops,
   SendUpgradeStructureIntentEvent,
 } from "../../Transport";
 import { UIState } from "../../UIState";
@@ -37,6 +38,20 @@ const atomBombIcon = assetUrl("images/NukeIconWhite.svg");
 const portIcon = assetUrl("images/PortIcon.svg");
 const samlauncherIcon = assetUrl("images/SamLauncherIconWhite.svg");
 const shieldIcon = assetUrl("images/ShieldIconWhite.svg");
+const aaDefenseIcon = assetUrl("images/AADefenseIconWhite.svg");
+const airfieldIcon = assetUrl("images/AirfieldIconWhite.svg");
+const fighterJetIcon = assetUrl("images/FighterJetIconWhite.svg");
+const bomberIcon = assetUrl("images/BomberIconWhite.svg");
+const railDepotIcon = assetUrl("images/RailDepotIconWhite.svg");
+const repairStationIcon = assetUrl("images/RepairStationIconWhite.svg");
+const tankIcon = assetUrl("images/TankIconWhite.svg");
+const nuclearSubmarineIcon = assetUrl("images/NuclearSubmarineIconWhite.svg");
+const landMineIcon = assetUrl("images/LandMineIconWhite.svg");
+const seaMineIcon = assetUrl("images/SeaMineIconWhite.svg");
+const aircraftCarrierIcon = assetUrl("images/AircraftCarrierIconWhite.svg");
+const cruiseMissileIcon = assetUrl("images/CruiseMissileIconWhite.svg");
+const transportPlaneIcon = assetUrl("images/TransportPlaneIconWhite.svg");
+const capitalIcon = assetUrl("images/CapitalIconWhite.svg");
 
 export interface BuildItemDisplay {
   unitType: PlayerBuildableUnitType;
@@ -70,10 +85,66 @@ const buildTable: BuildItemDisplay[][] = [
       countable: false,
     },
     {
+      unitType: UnitType.CruiseMissile,
+      icon: cruiseMissileIcon,
+      description: "build_menu.desc.cruise_missile",
+      key: "unit_type.cruise_missile",
+      countable: false,
+    },
+    {
       unitType: UnitType.Warship,
       icon: warshipIcon,
       description: "build_menu.desc.warship",
       key: "unit_type.warship",
+      countable: true,
+    },
+    {
+      unitType: UnitType.AircraftCarrier,
+      icon: aircraftCarrierIcon,
+      description: "build_menu.desc.aircraft_carrier",
+      key: "unit_type.aircraft_carrier",
+      countable: true,
+    },
+    {
+      unitType: UnitType.FighterJet,
+      icon: fighterJetIcon,
+      description: "build_menu.desc.fighter_jet",
+      key: "unit_type.fighter_jet",
+      countable: true,
+    },
+    {
+      unitType: UnitType.Bomber,
+      icon: bomberIcon,
+      description: "build_menu.desc.bomber",
+      key: "unit_type.bomber",
+      countable: true,
+    },
+    {
+      unitType: UnitType.TransportPlane,
+      icon: transportPlaneIcon,
+      description: "build_menu.desc.transport_plane",
+      key: "unit_type.transport_plane",
+      countable: false,
+    },
+    {
+      unitType: UnitType.Tank,
+      icon: tankIcon,
+      description: "build_menu.desc.tank",
+      key: "unit_type.tank",
+      countable: true,
+    },
+    {
+      unitType: UnitType.NuclearSubmarine,
+      icon: nuclearSubmarineIcon,
+      description: "build_menu.desc.nuclear_submarine",
+      key: "unit_type.nuclear_submarine",
+      countable: true,
+    },
+    {
+      unitType: UnitType.SeaMine,
+      icon: seaMineIcon,
+      description: "build_menu.desc.sea_mine",
+      key: "unit_type.sea_mine",
       countable: true,
     },
     {
@@ -102,6 +173,48 @@ const buildTable: BuildItemDisplay[][] = [
       icon: shieldIcon,
       description: "build_menu.desc.defense_post",
       key: "unit_type.defense_post",
+      countable: true,
+    },
+    {
+      unitType: UnitType.AADefense,
+      icon: aaDefenseIcon,
+      description: "build_menu.desc.aa_defense",
+      key: "unit_type.aa_defense",
+      countable: true,
+    },
+    {
+      unitType: UnitType.Airfield,
+      icon: airfieldIcon,
+      description: "build_menu.desc.airfield",
+      key: "unit_type.airfield",
+      countable: true,
+    },
+    {
+      unitType: UnitType.RailDepot,
+      icon: railDepotIcon,
+      description: "build_menu.desc.rail_depot",
+      key: "unit_type.rail_depot",
+      countable: true,
+    },
+    {
+      unitType: UnitType.RepairStation,
+      icon: repairStationIcon,
+      description: "build_menu.desc.repair_station",
+      key: "unit_type.repair_station",
+      countable: true,
+    },
+    {
+      unitType: UnitType.Capital,
+      icon: capitalIcon,
+      description: "build_menu.desc.capital",
+      key: "unit_type.capital",
+      countable: false,
+    },
+    {
+      unitType: UnitType.LandMine,
+      icon: landMineIcon,
+      description: "build_menu.desc.land_mine",
+      key: "unit_type.land_mine",
       countable: true,
     },
     {
@@ -398,7 +511,17 @@ export class BuildMenu extends LitElement implements Controller {
           ? this.uiState.rocketDirectionUp
           : undefined;
       this.eventBus.emit(
-        new BuildUnitIntentEvent(buildableUnit.type, tile, rocketDirectionUp),
+        new BuildUnitIntentEvent(
+          buildableUnit.type,
+          tile,
+          rocketDirectionUp,
+          undefined,
+          paradropTroops(
+            buildableUnit.type,
+            () => this.game.myPlayer()?.troops(),
+            this.uiState.attackRatio,
+          ),
+        ),
       );
     }
     this.hideMenu();
@@ -507,7 +630,12 @@ export class BuildMenu extends LitElement implements Controller {
 
   private getBuildableUnits(): BuildItemDisplay[][] {
     return buildTable.map((row) =>
-      row.filter((item) => !this.game?.config()?.isUnitDisabled(item.unitType)),
+      row.filter(
+        (item) =>
+          !this.game?.config()?.isUnitDisabled(item.unitType) &&
+          // Draft mode: only what the deck unlocks.
+          this.game?.isDraftLocked?.(item.unitType) !== true,
+      ),
     );
   }
 

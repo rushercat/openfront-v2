@@ -82,6 +82,11 @@ export class QuickChatExecution implements Execution {
     return false;
   }
 
+  /** Not held up by a congress vote (Politics). */
+  activeDuringFreeze(): boolean {
+    return true;
+  }
+
   private getMessageFromKey(fullKey: string): string[] {
     const translated = fullKey.split(".");
     return translated;

@@ -24,6 +24,9 @@ export class GameHealth {
   private frameWindowCount = 0;
   private lowFrameMs = 0;
   private lowFrameRate = false;
+  /** Below this FPS the performance warning counts (lower under a low frame cap). */
+  private lowFps = 30;
+  private recoverFps = 35;
   private catchingUpSince: number | null = null;
   private sampling = false;
   private networkEnabled = false;
@@ -48,6 +51,15 @@ export class GameHealth {
     this.clearState();
   }
 
+  /**
+   * The player's frame cap (FramePacer), 0 for none. A 30 FPS cap draws
+   * about 30 frames a second on purpose: that isn't the game struggling.
+   */
+  setFrameCap(maxFps: number): void {
+    this.lowFps = maxFps > 0 ? Math.min(30, maxFps * 0.75) : 30;
+    this.recoverFps = maxFps > 0 ? Math.min(35, maxFps * 0.85) : 35;
+  }
+
   recordFrame(nowMs: number): void {
     if (!this.sampling) return;
     if (this.lastFrameAt !== null) {
@@ -58,14 +70,14 @@ export class GameHealth {
         this.frameWindowCount++;
         if (this.frameWindowMs >= 1000) {
           const fps = (this.frameWindowCount * 1000) / this.frameWindowMs;
-          if (fps < 30) {
+          if (fps < this.lowFps) {
             // One blocked frame is jank, not sustained low FPS. Require
             // several completed windows before displaying the warning.
             this.lowFrameMs += Math.min(this.frameWindowMs, 1000);
             this.lowFrameRate = this.lowFrameMs >= 3000;
-          } else if (!this.lowFrameRate || fps >= 35) {
-            // An incomplete streak must stay continuously below 30 FPS.
-            // Only an active warning uses the 35 FPS recovery threshold.
+          } else if (!this.lowFrameRate || fps >= this.recoverFps) {
+            // An incomplete streak must stay continuously below lowFps (30).
+            // Only an active warning uses the recoverFps (35) threshold.
             this.lowFrameMs = 0;
             this.lowFrameRate = false;
           }

@@ -1,12 +1,19 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
-import { Cell, UnitType } from "@openfront/engine-api/game/GameTypes";
+import {
+  Aircraft,
+  Cell,
+  PatrolUnits,
+  UnitType,
+} from "@openfront/engine-api/game/GameTypes";
 import { EventBus } from "@openfront/shared/EventBus";
 import { Controller } from "../Controller";
 import {
   CloseViewEvent,
   ContextMenuEvent,
+  LandClickEvent,
   MouseUpEvent,
   SelectAllWarshipsEvent,
+  SurfaceSubmarinesEvent,
   TouchEvent,
   UnitSelectionEvent,
   WarshipSelectionBoxCancelEvent,
@@ -14,14 +21,25 @@ import {
   WarshipSelectionBoxUpdateEvent,
 } from "../InputHandler";
 import { MapRenderer } from "../render/gl";
+import { OWNER_MASK } from "../render/gl/utils/TileCodec";
 import { TransformHandler } from "../TransformHandler";
-import { MoveWarshipIntentEvent } from "../Transport";
+import {
+  MoveWarshipIntentEvent,
+  SurfaceSubmarineIntentEvent,
+} from "../Transport";
 import { GameView, UnitView } from "../view";
 
 const WARSHIP_SELECTION_RADIUS = 10;
 
 /**
- * Controller for warship selection state + click handling.
+ * Controller for warship and aircraft selection state + click handling.
+ *
+ * Aircraft are selected and sent around like warships (the engine keeps
+ * their patrol tile in warshipState). The difference is where: a warship is
+ * picked and sent on water only, an aircraft anywhere. A click on land is an
+ * attack unless it is meant for an aircraft, so it arrives here as a
+ * LandClickEvent from ClientGameRunner, which attacks only if this
+ * controller leaves the event unhandled.
  *
  * Drawing for selection boxes (single + multi) lives in the WebGL
  * SelectionBoxPass (forwarded via UnitSelectionEvent from ClientGameRunner).
@@ -57,6 +75,84 @@ export class WarshipSelectionController implements Controller {
     this.multiSelectedWarships = this.multiSelectedWarships.filter((u) =>
       u.isActive(),
     );
+    this.refreshTankBuffer();
+  }
+
+  // --- Tank border buffer ---
+
+  private tankBufferShown = false;
+  private tankBufferTicks = 0;
+  private tankBufferPending = false;
+
+  /**
+   * While a tank of the player is selected, outline how far past the
+   * border it may drive unharmed (Config.tankBorderBuffer): the union of
+   * circles of that radius around the border, sampled on a coarse grid.
+   * Refreshed every second, as the border moves.
+   */
+  private refreshTankBuffer(): void {
+    const myPlayer = this.game.myPlayer();
+    const selected =
+      this.selectedUnit !== null
+        ? [this.selectedUnit]
+        : this.multiSelectedWarships;
+    const tankSelected =
+      myPlayer !== null &&
+      selected.some(
+        (u) =>
+          u.isActive() && u.type() === UnitType.Tank && u.owner() === myPlayer,
+      );
+    if (!tankSelected) {
+      if (this.tankBufferShown) {
+        this.tankBufferShown = false;
+        this.view.setTankBuffer(null);
+      }
+      this.tankBufferTicks = 0;
+      return;
+    }
+    if (
+      this.tankBufferPending ||
+      (this.tankBufferShown && ++this.tankBufferTicks < 10)
+    ) {
+      return;
+    }
+    this.tankBufferTicks = 0;
+    this.tankBufferPending = true;
+    const radius = this.game.config().tankBorderBuffer();
+    // Dense enough that the outline follows the border closely (it can be off
+    // by about half a cell).
+    const cell = Math.max(3, Math.floor(radius / 6));
+    const mySmallID = myPlayer!.smallID();
+    // The circles reach into the player's own land as far as out of it; own
+    // land is always safe, so only the outline beyond the border is drawn.
+    const keepAt = (x: number, y: number): boolean => {
+      const tx = Math.floor(x);
+      const ty = Math.floor(y);
+      if (!this.game.isValidCoord(tx, ty)) return true;
+      const ref = this.game.ref(tx, ty);
+      return (this.game.tileState(ref) & OWNER_MASK) !== mySmallID;
+    };
+    myPlayer!
+      .borderTiles()
+      .then(({ borderTiles }) => {
+        const seen = new Set<number>();
+        const circles: { x: number; y: number; radius: number }[] = [];
+        const w = this.game.width();
+        for (const tile of borderTiles) {
+          const x = tile % w;
+          const y = (tile - x) / w;
+          const key = Math.floor(x / cell) * 65536 + Math.floor(y / cell);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          circles.push({ x, y, radius });
+        }
+        this.tankBufferShown = true;
+        this.view.setTankBuffer(circles, keepAt);
+      })
+      .catch((error) => console.warn("Failed to get border tiles", error))
+      .finally(() => {
+        this.tankBufferPending = false;
+      });
   }
 
   init() {
@@ -73,11 +169,15 @@ export class WarshipSelectionController implements Controller {
 
     // Warship select/move click flow (previously in the deleted UnitLayer).
     this.eventBus.on(MouseUpEvent, (e) => this.onMouseUp(e));
+    this.eventBus.on(LandClickEvent, (e) => {
+      if (this.onLandClick(e.tile)) e.handled = true;
+    });
     this.eventBus.on(TouchEvent, (e) => this.onTouch(e));
     this.eventBus.on(WarshipSelectionBoxCompleteEvent, (e) =>
       this.onSelectionBoxComplete(e),
     );
     this.eventBus.on(SelectAllWarshipsEvent, () => this.onSelectAllWarships());
+    this.eventBus.on(SurfaceSubmarinesEvent, () => this.onSurfaceSubmarines());
   }
 
   /**
@@ -137,13 +237,17 @@ export class WarshipSelectionController implements Controller {
   }
 
   /**
-   * Find player-owned warships near the given cell, sorted by distance.
+   * Find player-owned warships and aircraft near the given cell, sorted by
+   * distance. On land only aircraft can be there.
    */
   private findWarshipsNearCell(clickRef: TileRef): UnitView[] {
     const myPlayer = this.game.myPlayer();
     if (!myPlayer) return [];
+    const types = this.game.isWater(clickRef)
+      ? PatrolUnits.types
+      : [...Aircraft.types, UnitType.Tank];
     return this.game
-      .units(UnitType.Warship)
+      .units(...types)
       .filter(
         (unit) =>
           unit.isActive() &&
@@ -207,6 +311,46 @@ export class WarshipSelectionController implements Controller {
   }
 
   /**
+   * A click on land (LandClickEvent). Returns true if it was meant for an
+   * aircraft, so that it must not attack:
+   *  - aircraft selected → send them there (selected warships stay put)
+   *  - nothing selected + one of the player's aircraft is flying there →
+   *    select it
+   */
+  private onLandClick(clickRef: TileRef): boolean {
+    const myPlayer = this.game.myPlayer();
+    if (!myPlayer) return false;
+    const selected =
+      this.selectedUnit !== null
+        ? [this.selectedUnit]
+        : this.multiSelectedWarships;
+    // Aircraft and tanks go on land.
+    const aircraftIds = selected
+      .filter(
+        (u) =>
+          u.isActive() &&
+          u.owner() === myPlayer &&
+          (Aircraft.has(u.type()) || u.type() === UnitType.Tank),
+      )
+      .map((u) => u.id());
+    if (aircraftIds.length > 0) {
+      this.eventBus.emit(new MoveWarshipIntentEvent(aircraftIds, clickRef));
+      this.eventBus.emit(new UnitSelectionEvent(null, false));
+      return true;
+    }
+    if (selected.length > 0) {
+      // Only warships selected: they cannot go on land, the click attacks.
+      return false;
+    }
+    const nearbyAircraft = this.findWarshipsNearCell(clickRef);
+    if (nearbyAircraft.length > 0) {
+      this.eventBus.emit(new UnitSelectionEvent(nearbyAircraft[0], true));
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Touch handler mirroring mouse-up. On dry land with no selection, falls
    * back to opening the radial menu.
    */
@@ -230,7 +374,11 @@ export class WarshipSelectionController implements Controller {
       return;
     }
     if (!this.game.isWater(clickRef)) {
-      this.eventBus.emit(new ContextMenuEvent(event.x, event.y));
+      // A tap on land sends the selected aircraft there or picks one up;
+      // otherwise it opens the radial menu.
+      if (!this.onLandClick(clickRef)) {
+        this.eventBus.emit(new ContextMenuEvent(event.x, event.y));
+      }
       return;
     }
     if (this.selectedUnit || this.multiSelectedWarships.length > 0) {
@@ -262,7 +410,9 @@ export class WarshipSelectionController implements Controller {
     const myPlayer = this.game.myPlayer();
     if (!myPlayer) return;
 
-    const selected = this.game.units(UnitType.Warship).filter((unit) => {
+    // The box picks up aircraft as well: a mixed selection sent to water goes
+    // there together, sent to land only the aircraft go.
+    const selected = this.game.units(...PatrolUnits.types).filter((unit) => {
       if (!unit.isActive() || unit.owner() !== myPlayer) return false;
       const screen = this.transformHandler.worldToScreenCoordinates(
         new Cell(this.game.x(unit.tile()), this.game.y(unit.tile())),
@@ -293,6 +443,33 @@ export class WarshipSelectionController implements Controller {
       allWarships.length > 0 &&
       this.multiSelectedWarships.length === allWarships.length
     );
+  }
+
+  /**
+   * Surfaces the selected submerged submarines; with none of them selected,
+   * every submerged submarine of the player.
+   */
+  private onSurfaceSubmarines() {
+    const myPlayer = this.game.myPlayer();
+    if (!myPlayer) return;
+    const selected =
+      this.selectedUnit !== null
+        ? [this.selectedUnit]
+        : this.multiSelectedWarships;
+    const isMySubmergedSub = (u: UnitView) =>
+      u.isActive() &&
+      u.owner() === myPlayer &&
+      u.type() === UnitType.NuclearSubmarine &&
+      u.state.submerged;
+    let subs = selected.filter(isMySubmergedSub);
+    if (subs.length === 0) {
+      subs = this.game
+        .units(UnitType.NuclearSubmarine)
+        .filter(isMySubmergedSub);
+    }
+    for (const sub of subs) {
+      this.eventBus.emit(new SurfaceSubmarineIntentEvent(sub.id()));
+    }
   }
 
   private onSelectAllWarships() {

@@ -32,12 +32,17 @@ import type {
   SnapshotReader,
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
+import { playsHistoricalScenario } from "./HistoricalScenarioExecution";
+import { handleNationAircraft } from "./nation/NationAircraftBehavior";
 import { NationAllianceBehavior } from "./nation/NationAllianceBehavior";
 import { NationAttackBehavior } from "./nation/NationAttackBehavior";
 import { NationEmojiBehavior } from "./nation/NationEmojiBehavior";
+import { handleNationGroundAndNaval } from "./nation/NationGroundNavalBehavior";
 import { NationMIRVBehavior } from "./nation/NationMIRVBehavior";
+import { handleNationModernWarfare } from "./nation/NationModernWarfareBehavior";
 import { NationNukeBehavior } from "./nation/NationNukeBehavior";
 import { NationStructureBehavior } from "./nation/NationStructureBehavior";
+import { aiUnitDisabled } from "./nation/NationUtils";
 import { NationWarshipBehavior } from "./nation/NationWarshipBehavior";
 import { tutorialCollapse } from "./nation/TutorialCollapse";
 import { tutorialSilo, tutorialWarship } from "./nation/TutorialSilo";
@@ -137,7 +142,7 @@ export class NationExecution implements Execution {
       this.mg.config().gameConfig().difficulty !== Difficulty.Easy &&
       !this.mg.config().gameConfig().tutorial &&
       this.player.unitsConstructed(UnitType.Port) &&
-      !this.mg.config().isUnitDisabled(UnitType.Warship)
+      !aiUnitDisabled(this.mg, this.player, UnitType.Warship)
     ) {
       this.warshipBehavior.trackShipsAndRetaliate();
     }
@@ -147,6 +152,11 @@ export class NationExecution implements Execution {
     }
 
     if (this.mg.inSpawnPhase()) {
+      // A historical scenario places every nation itself
+      // (HistoricalScenarioExecution): no spawning, no hopping around.
+      if (playsHistoricalScenario(this.mg)) {
+        return;
+      }
       if (this.player.hasSpawned()) {
         // Already on the map — periodically re-spawn so the nation
         // visibly hops to different locations during the spawn phase.
@@ -262,6 +272,10 @@ export class NationExecution implements Execution {
     this.mirvBehavior.considerMIRV();
     this.structureBehavior.handleStructures();
     this.warshipBehavior.maybeSpawnWarship();
+    this.warshipBehavior.defendWaters();
+    handleNationAircraft(this.mg, this.player);
+    handleNationGroundAndNaval(this.mg, this.player);
+    handleNationModernWarfare(this.mg, this.player);
     this.handleEmbargoesToHostileNations();
     this.attackBehavior.maybeAttack();
     this.warshipBehavior.counterWarshipInfestation();

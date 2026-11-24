@@ -1,6 +1,7 @@
 import {
   GameMapType,
   listedMaps,
+  GameFeature,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
 import { GameConfig } from "@openfront/engine-api/Schemas";
@@ -129,6 +130,17 @@ export function getNationsForCompactMap(
 
 export function getRandomMapType(): GameMapType {
   return listedMaps[Math.floor(Math.random() * listedMaps.length)].type;
+}
+
+/** Like getUpdatedDisabledUnits, for the switchable mechanics. */
+export function getUpdatedDisabledFeatures(
+  disabledFeatures: GameFeature[],
+  feature: GameFeature,
+  checked: boolean,
+): GameFeature[] {
+  return checked
+    ? [...disabledFeatures, feature]
+    : disabledFeatures.filter((f) => f !== feature);
 }
 
 export function getUpdatedDisabledUnits(

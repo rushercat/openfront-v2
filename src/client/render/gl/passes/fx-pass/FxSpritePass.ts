@@ -9,10 +9,16 @@
 import type { Config } from "@openfront/engine-lib/configuration/Config";
 import type { ConquestFx, DeadUnitFx, RendererConfig } from "../../../types";
 import {
+  AIRCRAFT_TYPES,
   STRUCTURE_TYPES,
+  UT_SAM_MISSILE,
   UT_SHELL,
   UT_TRAIN,
   UT_WARSHIP,
+  UT_LAND_MINE,
+  UT_NUCLEAR_SUBMARINE,
+  UT_SEA_MINE,
+  UT_TANK,
 } from "../../../types";
 import { DynamicInstanceBuffer } from "../../DynamicBuffer";
 import type { RenderSettings } from "../../RenderSettings";
@@ -44,6 +50,9 @@ const FX_MINI_SMOKE_FIRE = 9;
 const FX_DUST = 10;
 const FX_CONQUEST = 11;
 const FX_TYPE_COUNT = 12;
+
+/** Matches Config.seaMineBlastRadius(). */
+const SEA_MINE_BLAST_RADIUS = 15;
 
 // ---------------------------------------------------------------------------
 // FX sprite config (matches AnimatedSpriteLoader)
@@ -362,14 +371,39 @@ export class FxSpritePass {
       return;
     }
 
-    if (typeName === UT_WARSHIP) {
+    if (typeName === UT_WARSHIP || typeName === UT_NUCLEAR_SUBMARINE) {
       this.pushFx(x, y, FX_UNIT_EXPLOSION, now);
       this.pushFx(x, y, FX_SINKING_SHIP, now);
       return;
     }
 
+    // A sea mine only leaves the game going off: a small nuke-like blast
+    // over the ships it sinks (Config.seaMineBlastRadius).
+    if (typeName === UT_SEA_MINE) {
+      this.spawnNukeSprites(x, y, SEA_MINE_BLAST_RADIUS, now, unit.pos);
+      return;
+    }
+
+    if (typeName === UT_LAND_MINE || typeName === UT_TANK) {
+      this.pushFx(x, y, FX_UNIT_EXPLOSION, now);
+      return;
+    }
+
     if (typeName === UT_SHELL && unit.reachedTarget) {
       this.pushFx(x, y, FX_MINI_EXPLOSION, now);
+      return;
+    }
+
+    // An AA missile that hit its aircraft (a SAM's missile never reaches a
+    // target: the intercepted nuke explodes instead).
+    if (typeName === UT_SAM_MISSILE && unit.reachedTarget) {
+      this.pushFx(x, y, FX_MINI_EXPLOSION, now);
+      return;
+    }
+
+    // Aircraft only leave the game shot down.
+    if (AIRCRAFT_TYPES.has(typeName)) {
+      this.pushFx(x, y, FX_UNIT_EXPLOSION, now);
       return;
     }
 

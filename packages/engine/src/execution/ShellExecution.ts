@@ -1,8 +1,9 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
-import { UnitType } from "@openfront/engine-api/game/GameTypes";
+import { Structures, UnitType } from "@openfront/engine-api/game/GameTypes";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import {
   zInt,
+  zNum,
   zPlayerRef,
   zRandom,
   zRef,
@@ -24,6 +25,25 @@ import type {
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
 
+/** Tiles a warship's or defense post's shell flies per tick. */
+const DEFAULT_SHELL_SPEED = 3;
+
+/**
+ * What an aircraft's shot does differently from a warship's shell. A fighter
+ * fires fast, weak shells; a bomber drops slow ones with a blast.
+ */
+export interface ShellOptions {
+  /** Damage on impact, instead of the warship roll in effectOnTarget(). */
+  damage?: number;
+  /** Tiles flown per tick. */
+  speed?: number;
+  /**
+   * Blast radius: the shell damages every structure in it that its owner may
+   * attack, not just its target.
+   */
+  splashRadius?: number;
+}
+
 export class ShellExecution implements Execution {
   private active = true;
   private pathFinder: SteppingPathFinder<TileRef>;
@@ -31,13 +51,21 @@ export class ShellExecution implements Execution {
   private mg: Game;
   private destroyAtTick: number = -1;
   private random: PseudoRandom;
+  private fixedDamage: number | null;
+  private speed: number;
+  private splashRadius: number;
 
   constructor(
     private spawn: TileRef,
     private _owner: Player,
     private ownerUnit: Unit,
     private target: Unit,
-  ) {}
+    options: ShellOptions = {},
+  ) {
+    this.fixedDamage = options.damage ?? null;
+    this.speed = options.speed ?? DEFAULT_SHELL_SPEED;
+    this.splashRadius = options.splashRadius ?? 0;
+  }
 
   init(mg: Game, ticks: number): void {
     this.pathFinder = PathFinding.Air(mg);
@@ -65,7 +93,7 @@ export class ShellExecution implements Execution {
       this.destroyAtTick = this.mg.ticks() + this.mg.config().shellLifetime();
     }
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < this.speed; i++) {
       const result = this.pathFinder.next(
         this.shell.tile(),
         this.target.tile(),
@@ -74,7 +102,12 @@ export class ShellExecution implements Execution {
         this.active = false;
         const targetType = this.target.type();
         const targetWasActive = this.target.isActive();
-        this.target.modifyHealth(-this.effectOnTarget(), this._owner);
+        const damage = this.fixedDamage ?? this.effectOnTarget();
+        if (this.splashRadius > 0) {
+          this.damageStructuresInBlast(damage);
+        } else {
+          this.target.modifyHealth(-damage, this._owner);
+        }
         // Award veterancy to the firing warship when this shell lands the
         // killing blow on an enemy warship or transport ship.
         if (
@@ -91,6 +124,27 @@ export class ShellExecution implements Execution {
       } else if (result.status === PathStatus.NEXT) {
         this.shell.move(result.node);
       }
+    }
+  }
+
+  /** A bomb: every structure in the blast its owner may attack takes the hit. */
+  private damageStructuresInBlast(damage: number): void {
+    const hits = this.mg.nearbyUnits(
+      this.target.tile(),
+      this.splashRadius,
+      Structures.types,
+      undefined,
+      true,
+    );
+    for (const { unit } of hits) {
+      if (
+        !unit.isActive() ||
+        unit.owner() === this._owner ||
+        !this._owner.canAttackPlayer(unit.owner(), true)
+      ) {
+        continue;
+      }
+      unit.modifyHealth(-damage, this._owner);
     }
   }
 
@@ -142,6 +196,9 @@ export class ShellExecution implements Execution {
       owner: w.player(this._owner),
       ownerUnit: w.unit(this.ownerUnit),
       target: w.unit(this.target),
+      fixedDamage: this.fixedDamage,
+      speed: this.speed,
+      splashRadius: this.splashRadius,
     });
   }
 
@@ -158,6 +215,9 @@ export class ShellExecution implements Execution {
     this._owner = r.player(s.owner);
     this.ownerUnit = r.unit(s.ownerUnit);
     this.target = r.unit(s.target);
+    this.fixedDamage = s.fixedDamage;
+    this.speed = s.speed;
+    this.splashRadius = s.splashRadius;
   }
 }
 
@@ -172,12 +232,24 @@ const ShellStateSchema = z.object({
   owner: zPlayerRef(),
   ownerUnit: zRef(),
   target: zRef(),
+  fixedDamage: zNum().nullable(),
+  speed: zInt(),
+  splashRadius: zInt(),
 });
 type ShellState = z.infer<typeof ShellStateSchema>;
 
 export const ShellExecutionSnapshot = execSnapshotType({
   name: "Shell",
-  version: 1,
+  version: 2,
+  // Version 1 predates aircraft: every shell was a warship's.
+  migrations: {
+    1: (d) => ({
+      ...d,
+      fixedDamage: null,
+      speed: DEFAULT_SHELL_SPEED,
+      splashRadius: 0,
+    }),
+  },
   schema: ShellStateSchema,
   cls: () => ShellExecution,
 });

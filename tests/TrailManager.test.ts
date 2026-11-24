@@ -49,6 +49,7 @@ function makeUnit(
     samUpgradeStartRange: null,
     samUpgradeTargetLevel: null,
     samUpgradeDuration: null,
+    submerged: false,
   };
 }
 
@@ -70,6 +71,11 @@ describe("TrailManager", () => {
     tm.update(units, [1]);
     u.lastPos = u.pos;
     u.pos = ref(12, 10);
+    tm.update(units, [1]);
+    // The boat glides lastPos→pos (UnitGlide): its trail ends at lastPos
+    // until the next tick, so it never runs ahead of the boat.
+    expect(tm.getTrailState()[ref(6, 10)]).toBe(0);
+    u.lastPos = u.pos;
     tm.update(units, [1]);
 
     for (let x = 5; x <= 12; x++) {
@@ -107,6 +113,10 @@ describe("TrailManager", () => {
     a.pos = ref(12, 10);
     b.lastPos = b.pos;
     b.pos = ref(8, 12);
+    tm.update(units, [1, 2]);
+    // Boats' trails reach lastPos (they glide there): one more tick at rest.
+    a.lastPos = a.pos;
+    b.lastPos = b.pos;
     tm.update(units, [1, 2]);
 
     units.delete(1);

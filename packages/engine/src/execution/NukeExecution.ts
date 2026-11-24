@@ -35,6 +35,7 @@ import type {
   SnapshotReader,
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
+import { recordNukeLaunch } from "./NukeLaunch";
 
 const SPRITE_RADIUS = 16;
 
@@ -262,9 +263,10 @@ export class NukeExecution implements Execution {
         this.mg.stats().bombLaunch(this.player, target, this.nukeType);
       }
 
-      // after sending a nuke set the missilesilo on cooldown
-      if (silo) {
-        silo.launch();
+      // after sending a nuke set the missilesilo on cooldown (or spend the
+      // payload of the submarine it came from)
+      if (this.nukeType !== UnitType.MIRVWarhead) {
+        recordNukeLaunch(this.mg, this.player, spawn, this.nukeType);
       }
       return;
     }

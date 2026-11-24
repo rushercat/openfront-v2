@@ -8,11 +8,16 @@
 import type { Config } from "@openfront/engine-lib/configuration/Config";
 import type { RendererConfig, UnitState } from "../../types";
 import {
+  AIRCRAFT_TYPES,
   SMOOTHED_NUKE_TYPES,
+  UT_AA_DEFENSE,
+  UT_AIRFIELD,
   UT_ATOM_BOMB,
+  UT_BOMBER,
   UT_CITY,
   UT_DEFENSE_POST,
   UT_FACTORY,
+  UT_FIGHTER_JET,
   UT_HYDROGEN_BOMB,
   UT_MIRV,
   UT_MIRV_WARHEAD,
@@ -26,6 +31,7 @@ import {
 } from "../../types";
 import type { RenderSettings } from "../RenderSettings";
 import { createProgram, shaderSrc } from "../utils/GlUtils";
+import type { UnitGlide } from "../utils/UnitGlide";
 
 import lightFragSrc from "../shaders/day-night/light.frag.glsl?raw";
 import lightVertSrc from "../shaders/day-night/light.vert.glsl?raw";
@@ -49,6 +55,10 @@ const LIGHT_CONFIGS: Record<string, LightConfig> = {
   [UT_DEFENSE_POST]: { r: 0.8, g: 0.85, b: 1.0, radius: 18, intensity: 1.2 },
   [UT_SAM_LAUNCHER]: { r: 0.8, g: 0.85, b: 1.0, radius: 18, intensity: 1.2 },
   [UT_MISSILE_SILO]: { r: 1.0, g: 0.4, b: 0.2, radius: 18, intensity: 1.2 },
+  [UT_AA_DEFENSE]: { r: 0.8, g: 0.85, b: 1.0, radius: 18, intensity: 1.2 },
+  [UT_AIRFIELD]: { r: 1.0, g: 0.9, b: 0.7, radius: 22, intensity: 1.2 },
+  [UT_FIGHTER_JET]: { r: 0.9, g: 0.9, b: 1.0, radius: 6, intensity: 2.0 },
+  [UT_BOMBER]: { r: 0.9, g: 0.9, b: 1.0, radius: 8, intensity: 2.0 },
   [UT_TRANSPORT]: { r: 0.9, g: 0.8, b: 0.6, radius: 6, intensity: 2.7 },
   [UT_TRADE_SHIP]: { r: 0.9, g: 0.8, b: 0.6, radius: 6, intensity: 2.7 },
   [UT_WARSHIP]: { r: 0.9, g: 0.85, b: 0.7, radius: 10, intensity: 2.8 },
@@ -103,6 +113,7 @@ export class PointLightPass {
   // (lightIdx, lastX, lastY, x, y) recorded each tick, lerped into the light
   // buffer in draw() so the glow tracks the per-frame-smoothed missile sprite.
   private smoothSegs: number[] = [];
+  private glide: UnitGlide | null = null;
   private lastUnitsUpdateMs = 0;
   /** Simulation tick duration in ms (Config.msPerTick). */
   private tickIntervalMs: number;
@@ -182,6 +193,11 @@ export class PointLightPass {
   }
 
   /** Pack all light-emitting entities into the instance buffer and upload. Called every tick. */
+  /** The units' glide between ticks (UnitPass), so lights move with them. */
+  setGlide(glide: UnitGlide): void {
+    this.glide = glide;
+  }
+
   updateLights(units: Map<number, UnitState>): void {
     let count = 0;
     this.smoothSegs.length = 0;
@@ -197,9 +213,19 @@ export class PointLightPass {
 
       const x = unit.pos % this.mapW;
       const y = (unit.pos - x) / this.mapW;
-      if (SMOOTHED_NUKE_TYPES.has(unit.unitType) && unit.lastPos !== unit.pos) {
-        const lx = unit.lastPos % this.mapW;
-        const ly = (unit.lastPos - lx) / this.mapW;
+      // Nukes and aircraft glide from lastPos; ships, trains and boats from
+      // their previous tick's tile — UnitPass recorded which (UnitGlide).
+      const from =
+        this.glide !== null
+          ? this.glide.from.get(unit.id)
+          : (SMOOTHED_NUKE_TYPES.has(unit.unitType) ||
+                AIRCRAFT_TYPES.has(unit.unitType)) &&
+              unit.lastPos !== unit.pos
+            ? unit.lastPos
+            : undefined;
+      if (from !== undefined) {
+        const lx = from % this.mapW;
+        const ly = (from - lx) / this.mapW;
         this.smoothSegs.push(count, lx, ly, x, y);
       }
       const off = count * FLOATS_PER_LIGHT;
@@ -232,13 +258,15 @@ export class PointLightPass {
   private applySmoothing(): void {
     const segs = this.smoothSegs;
     if (segs.length === 0) return;
-    const alpha = Math.max(
-      0,
-      Math.min(
-        1,
-        (performance.now() - this.lastUnitsUpdateMs) / this.tickIntervalMs,
-      ),
-    );
+    const alpha =
+      this.glide?.alpha(performance.now()) ??
+      Math.max(
+        0,
+        Math.min(
+          1,
+          (performance.now() - this.lastUnitsUpdateMs) / this.tickIntervalMs,
+        ),
+      );
     const data = this.lightData;
     let dirty = false;
     for (let i = 0; i < segs.length; i += SMOOTH_SEG_STRIDE) {

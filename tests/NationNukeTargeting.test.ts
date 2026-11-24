@@ -318,19 +318,27 @@ describe("Nuke tile scores around SAMs", () => {
         human.units(),
         nukeType,
       );
-    return { game, human, score };
+    const guarded = (tile: TileRef): boolean =>
+      nukeBehavior(game, nation)["isGuardedBySam"](
+        tile,
+        game.ref(5, 5),
+        human.units(),
+      );
+    return { game, human, score, guarded };
   }
 
-  it("Medium won't nuke a city within 50 tiles of a SAM", async () => {
-    const { game, human, score } = await setupScore(Difficulty.Medium);
+  it("Medium sees a city within 50 tiles of a SAM as guarded, without devaluing it", async () => {
+    const { game, human, score, guarded } = await setupScore(Difficulty.Medium);
     const target = game.ref(120, 120);
     human.buildUnit(UnitType.City, target, {});
     expect(score(target, UnitType.AtomBomb)).toBeGreaterThan(0);
+    expect(guarded(target)).toBe(false);
 
     human.buildUnit(UnitType.SAMLauncher, game.ref(190, 190), {});
-    expect(score(target, UnitType.AtomBomb)).toBeGreaterThan(0);
+    expect(guarded(target)).toBe(false);
     human.buildUnit(UnitType.SAMLauncher, game.ref(130, 120), {});
-    expect(score(target, UnitType.AtomBomb)).toBe(-1);
+    expect(guarded(target)).toBe(true);
+    expect(score(target, UnitType.AtomBomb)).toBeGreaterThan(0);
   });
 
   // The test config gives SAMs a 20-tile range, a hydrogen bomb blasts 100 tiles wide

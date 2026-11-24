@@ -40,7 +40,15 @@ type CachedInterception = {
 /**
  * Smart SAM targeting system preshoting nukes so its range is strictly enforced
  */
-class SAMTargetingSystem {
+/** What SAMs shoot at: nuke warheads and cruise missiles (a MIRV carrier itself can't be hit). */
+export const SAM_TARGET_TYPES = [
+  UnitType.AtomBomb,
+  UnitType.HydrogenBomb,
+  UnitType.MIRVWarhead,
+  UnitType.CruiseMissile,
+] as const;
+
+export class SAMTargetingSystem {
   // Cached interception states indexed by nuke ID to avoid per-tick recomputation.
   private readonly precomputedNukes: Map<number, CachedInterception> =
     new Map();
@@ -268,7 +276,7 @@ class SAMTargetingSystem {
     const nukes = this.mg.nearbyUnits(
       samTile,
       detectionRange,
-      [UnitType.AtomBomb, UnitType.HydrogenBomb, UnitType.MIRVWarhead],
+      SAM_TARGET_TYPES,
       this.isTargetableNearbyUnit,
     );
 
@@ -394,7 +402,8 @@ export class SAMLauncherExecution implements Execution {
     if (
       this.mg.unitCount(UnitType.AtomBomb) === 0 &&
       this.mg.unitCount(UnitType.HydrogenBomb) === 0 &&
-      this.mg.unitCount(UnitType.MIRVWarhead) === 0
+      this.mg.unitCount(UnitType.MIRVWarhead) === 0 &&
+      this.mg.unitCount(UnitType.CruiseMissile) === 0
     ) {
       return;
     }
@@ -461,7 +470,7 @@ export class SAMLauncherExecution implements Execution {
   }
 }
 
-const TargetingStateSchema = z.array(
+export const TargetingStateSchema = z.array(
   z.object({
     id: zInt(),
     tick: zInt(),
@@ -471,7 +480,7 @@ const TargetingStateSchema = z.array(
     lastSeenTick: zInt(),
   }),
 );
-type TargetingState = z.infer<typeof TargetingStateSchema>;
+export type TargetingState = z.infer<typeof TargetingStateSchema>;
 
 const SAMLauncherStateSchema = z.object({
   active: z.boolean(),

@@ -12,6 +12,23 @@ import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import { assertNever, calculateBoundingBox } from "@openfront/engine-lib/Util";
 import { Game, Player } from "../../game/Game";
 
+/**
+ * openfront v2: whether this nation can't use a unit type at all: switched
+ * off in the lobby, or not (yet) unlocked by its deck in the draft and
+ * epochs modes. The AI asks this instead of config().isUnitDisabled, so it
+ * neither plans nor saves up for units it can't build.
+ */
+export function aiUnitDisabled(
+  game: Game,
+  player: Player,
+  type: UnitType,
+): boolean {
+  return (
+    game.config().isUnitDisabled(type) ||
+    game.draft()?.allowsUnit(player, type) === false
+  );
+}
+
 /** Starting gold from which nations place many structures at once, ballooning their max troops */
 const HIGH_STARTING_GOLD = 3_000_000n;
 

@@ -1,15 +1,18 @@
 import { zb } from "@openfront/zbin";
 import quickChatData from "resources/QuickChat.json";
 import { z } from "zod";
+import { DraftCardId } from "./game/Draft";
 import {
   AllPlayers,
   CustomGameMap,
   Difficulty,
   Duos,
   GameMapSize,
+  GameFeature,
   GameMapType,
   GameMode,
   GameType,
+  HistoricalScenarioId,
   HumansVsNations,
   MAX_UPGRADE_AMOUNT,
   Quads,
@@ -17,6 +20,7 @@ import {
   Trios,
   UnitType,
 } from "./game/GameTypes";
+import { DecreeType } from "./game/Politics";
 import { PlayerStatsSchema } from "./StatsSchemas";
 
 export type GameID = string;
@@ -40,6 +44,7 @@ export type Intent =
   | EmbargoIntent
   | QuickChatIntent
   | MoveWarshipIntent
+  | SurfaceSubmarineIntent
   | MarkDisconnectedIntent
   | EmbargoAllIntent
   | UpgradeStructureIntent
@@ -47,6 +52,10 @@ export type Intent =
   | KickPlayerIntent
   | TogglePauseIntent
   | UpdateGameConfigIntent
+  | ProposeDecreeIntent
+  | CastVoteIntent
+  | DraftPickIntent
+  | DraftResearchIntent
   | ToggleGameStartTimer;
 
 export type AttackIntent = z.infer<typeof AttackIntentSchema>;
@@ -68,6 +77,9 @@ export type UpgradeStructureIntent = z.infer<
   typeof UpgradeStructureIntentSchema
 >;
 export type MoveWarshipIntent = z.infer<typeof MoveWarshipIntentSchema>;
+export type SurfaceSubmarineIntent = z.infer<
+  typeof SurfaceSubmarineIntentSchema
+>;
 export type QuickChatIntent = z.infer<typeof QuickChatIntentSchema>;
 export type MarkDisconnectedIntent = z.infer<
   typeof MarkDisconnectedIntentSchema
@@ -78,6 +90,10 @@ export type AllianceExtensionIntent = z.infer<
 export type DeleteUnitIntent = z.infer<typeof DeleteUnitIntentSchema>;
 export type KickPlayerIntent = z.infer<typeof KickPlayerIntentSchema>;
 export type TogglePauseIntent = z.infer<typeof TogglePauseIntentSchema>;
+export type ProposeDecreeIntent = z.infer<typeof ProposeDecreeIntentSchema>;
+export type CastVoteIntent = z.infer<typeof CastVoteIntentSchema>;
+export type DraftPickIntent = z.infer<typeof DraftPickIntentSchema>;
+export type DraftResearchIntent = z.infer<typeof DraftResearchIntentSchema>;
 export type UpdateGameConfigIntent = z.infer<
   typeof UpdateGameConfigIntentSchema
 >;
@@ -218,6 +234,22 @@ export const DoomsdayClockConfigSchema = z.object({
   speed: z.enum(["slow", "normal", "fast", "veryfast"]).optional(),
 });
 
+// openfront v2: the draft mode (engine-api game/Draft). Send
+// {enabled:false} to switch it off; the other fields fall back to defaults.
+export const DraftConfigSchema = z.object({
+  enabled: z.boolean(),
+  picks: zb.uint({ min: 1, max: 12 }).optional(),
+  timing: z.enum(["before", "during"]).optional(),
+  offers: z.enum(["random", "mirrored"]).optional(),
+  declinedToOpponent: z.boolean().optional(),
+  visibleDecks: z.boolean().optional(),
+  baseSet: z.boolean().optional(),
+  pickSeconds: zb.uint({ min: 3, max: 60 }).optional(),
+  intervalSeconds: zb.uint({ min: 30, max: 900 }).optional(),
+  tech: z.enum(["none", "levels", "doctrines", "epochs"]).optional(),
+});
+export type DraftConfig = z.infer<typeof DraftConfigSchema>;
+
 // Overtime (anti-stalemate). After startMinutes of game time the tile share
 // required to win drops steadily from the 80% base at a fixed rate (see
 // OVERTIME_DEFAULTS in Config.ts), so the leading side eventually crosses the
@@ -352,6 +384,29 @@ export const GameConfigSchema = z.compile(
     // Stripped from gameStartInfo and from the advertised lobby config: sibling
     // ids are private lobby ids, which are join secrets.
     pool: PoolConfigSchema.optional(),
+    // openfront v2. With gameMap Custom: the uploaded custom map the game is
+    // on (packages/shared/src/CustomMaps.ts). Every client and the server
+    // load its files by this id.
+    customMapId: z
+      .string()
+      .regex(/^[a-z0-9]{12}$/)
+      .optional(),
+    // A historical scenario (engine-lib/game/HistoricalScenarios.ts): its map,
+    // nations, starting borders and fixed alliances replace the usual setup.
+    historicalScenario: z.enum(HistoricalScenarioId).optional(),
+    // Which scenario nation each human plays, chosen by the host (or the
+    // player in singleplayer). Humans left out get a free major nation.
+    scenarioAssignments: z
+      .array(z.object({ clientID: ID, nation: z.string().max(40) }))
+      .max(100)
+      .optional(),
+    // openfront v2: secret Risk-style missions in a historical scenario
+    // (engine-api/game/Missions.ts): fulfilling yours wins the game.
+    scenarioMissions: z.boolean().optional(),
+    // openfront v2: mechanics switched off for this game (see GameFeature).
+    disabledFeatures: z.enum(GameFeature).array().optional(),
+    // openfront v2: the draft mode (see DraftConfigSchema).
+    draft: DraftConfigSchema.optional(),
   }),
 );
 
@@ -359,9 +414,9 @@ export const GameConfigSchema = z.compile(
 // player cap: nullable so the host can lift it (null clears, undefined leaves
 // it alone), and at least 2 so a lobby can't be capped down to the host alone.
 export const GameConfigPatchSchema = GameConfigSchema.partial().extend({
-  // Stock maps only: a Custom map's files come with a scenario start, which a
-  // lobby can't carry yet.
-  gameMap: z.enum(GameMapType).optional(),
+  // A Custom map is an uploaded one, named by customMapId (the server checks
+  // it exists).
+  gameMap: z.enum({ ...GameMapType, Custom: CustomGameMap }).optional(),
   maxPlayers: zb.uint({ min: 2, max: 1000 }).nullable().optional(),
 });
 export type GameConfigPatch = z.infer<typeof GameConfigPatchSchema>;
@@ -499,6 +554,8 @@ export const BuildUnitIntentSchema = z.object({
   tile: zb.uint(),
   rocketDirectionUp: z.boolean().optional(),
   amount: zb.uint({ min: 1, max: MAX_UPGRADE_AMOUNT }).optional(),
+  // Transport plane only: the paratroopers it carries.
+  troops: zb.uint().optional(),
 });
 
 export const UpgradeStructureIntentSchema = z.object({
@@ -526,6 +583,12 @@ export const MoveWarshipIntentSchema = z.object({
 
 export const DeleteUnitIntentSchema = z.object({
   type: z.literal("delete_unit"),
+  unitId: zb.uint(),
+});
+
+/** Orders a submerged nuclear submarine to surface (and get ready to fire). */
+export const SurfaceSubmarineIntentSchema = z.object({
+  type: z.literal("surface_submarine"),
   unitId: zb.uint(),
 });
 
@@ -570,6 +633,38 @@ export const ToggleGameStartTimerIntentSchema = z.object({
   type: z.literal("toggle_game_start_timer"),
 });
 
+/** World congress: put one of the decrees on offer forward (Politics). */
+export const ProposeDecreeIntentSchema = z.object({
+  type: z.literal("propose_decree"),
+  decree: z.enum(DecreeType),
+  // Only for decrees aimed at a player the proposer picks.
+  target: MappedID.optional(),
+});
+
+/** World congress: vote on a proposal. */
+export const CastVoteIntentSchema = z.object({
+  type: z.literal("cast_vote"),
+  proposalId: zb.uint(),
+  vote: z.union([
+    z.literal("yes"),
+    z.literal("no"),
+    z.literal("abstain"),
+    z.literal("veto"),
+  ]),
+});
+
+/** Draft: keep one of the two cards on offer (engine-api game/Draft). */
+export const DraftPickIntentSchema = z.object({
+  type: z.literal("draft_pick"),
+  card: z.enum(DraftCardId),
+});
+
+/** Draft: research the next level of a card in the deck. */
+export const DraftResearchIntentSchema = z.object({
+  type: z.literal("draft_research"),
+  card: z.enum(DraftCardId),
+});
+
 export const IntentSchema = z.compile(
   z.discriminatedUnion("type", [
     AttackIntentSchema,
@@ -597,6 +692,11 @@ export const IntentSchema = z.compile(
     TogglePauseIntentSchema,
     UpdateGameConfigIntentSchema,
     ToggleGameStartTimerIntentSchema,
+    SurfaceSubmarineIntentSchema,
+    ProposeDecreeIntentSchema,
+    CastVoteIntentSchema,
+    DraftPickIntentSchema,
+    DraftResearchIntentSchema,
   ]),
 );
 

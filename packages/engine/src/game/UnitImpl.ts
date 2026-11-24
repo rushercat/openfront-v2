@@ -3,6 +3,8 @@ import {
   MessageType,
   NukeState,
   SamLauncherState,
+  SubmarineState,
+  Structures,
   TerraNullius,
   Tick,
   TrainType,
@@ -14,6 +16,10 @@ import {
   GameUpdateType,
   UnitUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
+import {
+  maxHealthAtLevel,
+  structureBaseHealth,
+} from "@openfront/engine-lib/game/UnitHealth";
 import { maxHealthWithVeterancy } from "@openfront/engine-lib/game/Veterancy";
 import {
   snapshotType,
@@ -62,6 +68,7 @@ export class UnitImpl implements Unit {
   // Nuke only
   private _deletionAt: number | null = null;
   private _samLauncherState: SamLauncherState | undefined;
+  private _submarineState: SubmarineState | undefined;
 
   constructor(
     private _type: UnitType,
@@ -98,6 +105,13 @@ export class UnitImpl implements Unit {
         startRange: this.mg.config().samRange(1),
         targetLevel: 1,
         duration: this.mg.config().samUpgradeDuration(),
+      };
+    }
+    if (this._type === UnitType.NuclearSubmarine) {
+      this._submarineState = {
+        mode: "submerged",
+        readyTick: 0,
+        payloadLeft: 0,
       };
     }
     if ("patrolTile" in params) {
@@ -184,6 +198,10 @@ export class UnitImpl implements Unit {
       samUpgrade:
         this._samLauncherState?.upgradeStartTick !== undefined
           ? { ...this._samLauncherState }
+          : undefined,
+      submarineState:
+        this._submarineState !== undefined
+          ? { ...this._submarineState }
           : undefined,
       pos: this._tile,
       markedForDeletion: this._deletionAt ?? false,
@@ -283,6 +301,9 @@ export class UnitImpl implements Unit {
 
   maxHealth(): number {
     const base = this.info().maxHealth ?? 1;
+    if (Structures.has(this._type)) {
+      return maxHealthAtLevel(base, this._level);
+    }
     // veterancy() is 0 for non-warships, so this returns base for them.
     return maxHealthWithVeterancy(
       base,
@@ -398,13 +419,25 @@ export class UnitImpl implements Unit {
   }
 
   private displayMessageOnDeleted(): void {
-    // Only warships and transport ships are worth notifying about; everything
-    // else is either visible on the map or too low-stakes to surface.
-    if (
-      this._type !== UnitType.Warship &&
-      this._type !== UnitType.TransportShip
-    ) {
-      return;
+    // Only warships, transport ships and aircraft are worth notifying about;
+    // everything else is either visible on the map or too low-stakes to
+    // surface.
+    let unit: string;
+    switch (this._type) {
+      case UnitType.Warship:
+        unit = "unit_type.warship";
+        break;
+      case UnitType.TransportShip:
+        unit = "unit_type.boat";
+        break;
+      case UnitType.FighterJet:
+        unit = "unit_type.fighter_jet";
+        break;
+      case UnitType.Bomber:
+        unit = "unit_type.bomber";
+        break;
+      default:
+        return;
     }
 
     this.mg.displayMessage(
@@ -412,12 +445,7 @@ export class UnitImpl implements Unit {
       MessageType.UNIT_DESTROYED,
       this.owner().id(),
       undefined,
-      {
-        unit:
-          this._type === UnitType.TransportShip
-            ? "unit_type.boat"
-            : "unit_type.warship",
-      },
+      { unit },
       this.id(),
     );
   }
@@ -578,6 +606,22 @@ export class UnitImpl implements Unit {
     return this._missileTimerQueue;
   }
 
+  submarineState(): SubmarineState | undefined {
+    return this._submarineState;
+  }
+
+  updateSubmarineState(update: Partial<SubmarineState>): void {
+    if (this._submarineState === undefined) {
+      return;
+    }
+    this._submarineState = { ...this._submarineState, ...update };
+    this.mg.addUpdate(this.toUpdate());
+  }
+
+  isSubmerged(): boolean {
+    return this._submarineState?.mode === "submerged";
+  }
+
   samLauncherState(): SamLauncherState | undefined {
     return this._samLauncherState;
   }
@@ -675,7 +719,9 @@ export class UnitImpl implements Unit {
   }
 
   recordKill(targetType: UnitType): void {
-    if (this._warshipState === undefined) {
+    // Aircraft carry a warshipState for their patrol tile, but only warships
+    // gain veterancy.
+    if (this._warshipState === undefined || this._type !== UnitType.Warship) {
       return;
     }
     if (targetType === UnitType.Warship) {
@@ -689,7 +735,7 @@ export class UnitImpl implements Unit {
   }
 
   recordTradeCapture(): void {
-    if (this._warshipState === undefined) {
+    if (this._warshipState === undefined || this._type !== UnitType.Warship) {
       return;
     }
     this.addVeterancyProgress(UnitType.TradeShip);
@@ -752,11 +798,19 @@ export class UnitImpl implements Unit {
         duration: this.mg.config().samUpgradeDuration(),
       };
     }
+    const maxHealthBefore = this.maxHealth();
     this._level++;
+    // The new level brings its extra health with it; damage already taken
+    // stays.
+    this._health += toInt(this.maxHealth() - maxHealthBefore);
     // unitCount()/unitsOwned() are level-weighted and memoised on these versions
     this.mg.bumpUnitsVersion();
     this._owner._myUnitsVersion++;
-    if ([UnitType.MissileSilo, UnitType.SAMLauncher].includes(this.type())) {
+    if (
+      [UnitType.MissileSilo, UnitType.SAMLauncher, UnitType.AADefense].includes(
+        this.type(),
+      )
+    ) {
       this._missileTimerQueue.push(this.mg.ticks());
     }
     this.mg.addUpdate(this.toUpdate());
@@ -764,6 +818,7 @@ export class UnitImpl implements Unit {
 
   placeAtLevel(level: number): void {
     this._level = level;
+    this._health = toInt(this.maxHealth());
     this._missileTimerQueue = [];
     if (this._type === UnitType.SAMLauncher) {
       // No upgrade in progress: dynamicSamRange gives samRange(level).
@@ -777,7 +832,14 @@ export class UnitImpl implements Unit {
 
   decreaseLevel(destroyer?: Player): void {
     this._level--;
-    if ([UnitType.MissileSilo, UnitType.SAMLauncher].includes(this.type())) {
+    if (this._level > 0) {
+      this._health = withinInt(this._health, 1n, toInt(this.maxHealth()));
+    }
+    if (
+      [UnitType.MissileSilo, UnitType.SAMLauncher, UnitType.AADefense].includes(
+        this.type(),
+      )
+    ) {
       this._missileTimerQueue.pop();
     }
     if (this._type === UnitType.SAMLauncher) {
@@ -872,6 +934,13 @@ export class UnitImpl implements Unit {
             duration: this._samLauncherState.duration,
           }
         : null,
+      submarineState: this._submarineState
+        ? {
+            mode: this._submarineState.mode,
+            readyTick: this._submarineState.readyTick,
+            payloadLeft: this._submarineState.payloadLeft,
+          }
+        : null,
     };
   }
 
@@ -919,12 +988,27 @@ export class UnitImpl implements Unit {
     this._samLauncherState = s.samLauncherState
       ? { ...s.samLauncherState }
       : undefined;
+    this._submarineState = s.submarineState
+      ? { ...s.submarineState }
+      : undefined;
   }
 }
 
 export const UnitSnapshot = snapshotType({
   name: "Unit",
-  version: 1,
+  version: 3,
+  migrations: {
+    // Version 2 predates the nuclear submarine.
+    2: (d) => ({ ...d, submarineState: null }),
+    // Version 1 predates structure health: every structure stored the
+    // placeholder health of 1. Give each the full health of its level.
+    1: (d) => {
+      const base = structureBaseHealth(d.type);
+      return base === undefined
+        ? d
+        : { ...d, health: BigInt(maxHealthAtLevel(base, d.level)) };
+    },
+  },
   schema: z.object({
     id: zInt(),
     type: UnitTypeSchema,
@@ -978,6 +1062,13 @@ export const UnitSnapshot = snapshotType({
         startRange: zNum(),
         targetLevel: zInt(),
         duration: zInt(),
+      })
+      .nullable(),
+    submarineState: z
+      .object({
+        mode: z.enum(["submerged", "surfacing", "surfaced"]),
+        readyTick: zInt(),
+        payloadLeft: zInt(),
       })
       .nullable(),
   }),

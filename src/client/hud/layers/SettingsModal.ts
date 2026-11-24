@@ -360,7 +360,8 @@ export class SettingsModal extends LitElement implements Controller {
       };
     }
     const settings = notableLobbySettings(c, this.mapNationCount);
-    const hasDisabledUnits = (c.disabledUnits?.length ?? 0) > 0;
+    const hasDisabledUnits =
+      (c.disabledUnits?.length ?? 0) + (c.disabledFeatures?.length ?? 0) > 0;
     const cheats = hostCheatsList(c);
     const hasHostCheats = cheats.length > 0;
     const hasModifiers =
@@ -530,7 +531,10 @@ export class SettingsModal extends LitElement implements Controller {
     }
 
     const totalCount =
-      settings.length + (c.disabledUnits?.length ?? 0) + cheats.length;
+      settings.length +
+      (c.disabledUnits?.length ?? 0) +
+      (c.disabledFeatures?.length ?? 0) +
+      cheats.length;
 
     return html`
       ${this.renderAccordionStyles()}

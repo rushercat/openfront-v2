@@ -1,4 +1,5 @@
 import { UnitType } from "@openfront/engine-api/game/GameTypes";
+import { structureHealthFraction } from "@openfront/engine-lib/game/UnitHealth";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import {
   zInt,
@@ -64,12 +65,17 @@ export class TrainStationExecution implements Execution {
   }
 
   private shouldSpawnTrain(): boolean {
-    const spawnRate = this.mg
+    const baseRate = this.mg
       .config()
       .trainSpawnRate(
         this.unit.owner().unitCount(UnitType.Factory),
         this.mg.unitCount(UnitType.Train),
       );
+    // A damaged factory sends out trains less often, in proportion to its
+    // health (a factory at 0 health sends none).
+    const health = structureHealthFraction(this.unit);
+    if (health <= 0) return false;
+    const spawnRate = health >= 1 ? baseRate : Math.ceil(baseRate / health);
     for (let i = 0; i < this.unit!.level(); i++) {
       if (this.random.chance(spawnRate)) {
         return true;

@@ -157,7 +157,16 @@ export class SoundEffectController implements Controller {
       case UnitType.MIRV:
         this.emit("mirv-launch");
         break;
+      case UnitType.CruiseMissile:
+        if (unit.owner() === myPlayer) this.emit("atom-launch");
+        break;
       case UnitType.Warship:
+      case UnitType.FighterJet:
+      case UnitType.Bomber:
+      case UnitType.NuclearSubmarine:
+      case UnitType.Tank:
+      case UnitType.AircraftCarrier:
+      case UnitType.TransportPlane:
         if (unit.owner() === myPlayer) this.emit("build-warship");
         break;
       case UnitType.City:
@@ -170,9 +179,14 @@ export class SoundEffectController implements Controller {
         if (unit.owner() === myPlayer) this.emit("build-defense-post");
         break;
       case UnitType.SAMLauncher:
+      case UnitType.AADefense:
         if (unit.owner() === myPlayer) this.emit("sam-built");
         break;
       case UnitType.MissileSilo:
+      case UnitType.Airfield:
+      case UnitType.RailDepot:
+      case UnitType.RepairStation:
+      case UnitType.Capital:
         if (unit.owner() === myPlayer) this.emit("silo-built");
         break;
       case UnitType.Factory:

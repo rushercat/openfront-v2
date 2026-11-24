@@ -136,6 +136,10 @@ export class GPURenderer {
   private fxPass: FxPass;
   private rangeCirclePass: RangeCirclePass;
   private samRadiusPass: SAMRadiusPass;
+  /** Outlines how far the selected tanks may drive past the border. */
+  private tankBufferPass: SAMRadiusPass;
+  /** openfront v2: map lenses (air defense, air force range, …). */
+  private lensPass: SAMRadiusPass;
   private crosshairPass: CrosshairPass;
   private railroadPass: RailroadPass;
   private barPass: BarPass;
@@ -559,6 +563,9 @@ export class GPURenderer {
     // --- SAM radius overlay (dashed green circles during build mode) ---
     this.samRadiusPass = new SAMRadiusPass(gl, mapW, this.settings);
     this.samRadiusPass.setPaletteData(paletteData);
+    this.tankBufferPass = new SAMRadiusPass(gl, mapW, this.settings);
+    this.tankBufferPass.setPaletteData(paletteData);
+    this.lensPass = new SAMRadiusPass(gl, mapW, this.settings);
 
     // --- Crosshair (warship placement) ---
     this.crosshairPass = new CrosshairPass(gl);
@@ -589,6 +596,9 @@ export class GPURenderer {
     );
     this.fxPass = new FxPass(gl, header, this.settings, config);
     this.barPass = new BarPass(gl, header, this.settings, config);
+    // Bars and lights ride along with the units gliding between ticks.
+    this.barPass.setGlide(this.unitPass.glide);
+    this.pointLightPass.setGlide(this.unitPass.glide);
     this.worldTextPass = new WorldTextPass(gl, this.settings, config);
     this.worldTextPass.setMapWidth(this.mapW);
     this.selectionBoxPass = new SelectionBoxPass(gl);
@@ -1172,6 +1182,24 @@ export class GPURenderer {
   // Selection box (warship selection)
   // ---------------------------------------------------------------------------
 
+  /** Circles whose union is the area the selected tanks may drive in, or null. */
+  setTankBuffer(
+    circles: readonly { x: number; y: number; radius: number }[] | null,
+    keepAt: ((x: number, y: number) => boolean) | null = null,
+  ): void {
+    this.tankBufferPass.setCustomCircles(circles, [1, 0.55, 0], keepAt);
+  }
+
+  /** Circles of the active map lens, or null to hide the lens. */
+  setLensCircles(
+    circles: Parameters<SAMRadiusPass["setLensCircles"]>[0],
+  ): void {
+    this.lensPass.setLensCircles(circles);
+  }
+
+  /** Scratch for UnitGlide.position (selection boxes, per frame). */
+  private readonly glidePos: [number, number] = [0, 0];
+
   setSelectedUnits(unitIds: readonly number[]): void {
     // Copy in (callers may mutate their array).
     this.selectedUnitIds.length = 0;
@@ -1192,14 +1220,20 @@ export class GPURenderer {
     const entries = this.selectionBoxEntries;
     entries.length = 0;
     let writeIdx = 0;
+    const glideAlpha = this.unitPass.glide.alpha(performance.now());
     for (let i = 0; i < this.selectedUnitIds.length; i++) {
       const id = this.selectedUnitIds[i];
       const unit = this.lastUnits.get(id);
       if (!unit || !unit.isActive) continue; // dead — drop
       this.selectedUnitIds[writeIdx++] = id;
 
-      const centerX = unit.pos % this.mapW;
-      const centerY = Math.floor(unit.pos / this.mapW);
+      // On the unit as it glides between ticks, not on its tile.
+      const [centerX, centerY] = this.unitPass.glide.position(
+        id,
+        unit.pos,
+        glideAlpha,
+        this.glidePos,
+      );
       // Lighten the owner's territory color by ~20% (mix toward white).
       const off = unit.ownerID * 4;
       const r = Math.min(
@@ -1256,8 +1290,9 @@ export class GPURenderer {
     if (this.altView) this.affiliationPalette.flush();
     if (this.inSpawnPhase) {
       this.territoryPass.flushAllDripBuckets();
+      this.dripDebt = 0;
     } else {
-      this.territoryPass.drainDripBucket();
+      this.territoryPass.drainDripBuckets(this.dripBucketsDue());
     }
     // Full uploads need a full border recompute; scatter uploads already
     // pushed per-tile border patches via the wired `borderPatchConsumer`.
@@ -1273,6 +1308,26 @@ export class GPURenderer {
     this.trailPass.flushTexture();
     this.heatManager.updateHeat();
   }
+
+  /**
+   * Drip buckets to drain this frame: one per 60 Hz frame's worth of time
+   * since the last frame, and at least one. The drip was tuned for 60 fps (a
+   * full round in bucketCount frames); under a lower frame cap (FramePacer)
+   * one bucket a frame would stretch the round and land conquered tiles late.
+   */
+  private dripBucketsDue(): number {
+    const now = performance.now();
+    const last = this.lastDripMs;
+    this.lastDripMs = now;
+    if (last === null) return 1;
+    // A long gap (hidden tab) owes at most one full round.
+    this.dripDebt = Math.min(64, this.dripDebt + (now - last) / (1000 / 60));
+    const n = Math.max(1, Math.floor(this.dripDebt));
+    this.dripDebt = Math.max(0, this.dripDebt - n);
+    return n;
+  }
+  private lastDripMs: number | null = null;
+  private dripDebt = 0;
 
   private computeTextures(): void {
     if (this.settings.passEnabled.borderCompute) this.borderPass.draw();
@@ -1363,6 +1418,8 @@ export class GPURenderer {
     if (pe.unit) this.unitPass.drawGround(cam);
     if (pe.falloutBloom) this.bloomPass.draw(cam, this.frameTick);
     this.samRadiusPass.draw(cam);
+    this.tankBufferPass.draw(cam);
+    this.lensPass.draw(cam);
     this.rangeCirclePass.draw(cam);
     this.nukeTrajectoryPass.draw(cam);
     this.crosshairPass.draw(cam);
@@ -1503,6 +1560,8 @@ export class GPURenderer {
     this.railroadPass.dispose();
     this.rangeCirclePass.dispose();
     this.samRadiusPass.dispose();
+    this.tankBufferPass.dispose();
+    this.lensPass.dispose();
     this.crosshairPass.dispose();
     this.structurePass.dispose();
     this.structureLevelPass.dispose();

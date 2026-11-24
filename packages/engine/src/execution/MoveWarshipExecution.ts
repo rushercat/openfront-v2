@@ -1,5 +1,9 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
-import { UnitType } from "@openfront/engine-api/game/GameTypes";
+import {
+  Aircraft,
+  PatrolUnits,
+  UnitType,
+} from "@openfront/engine-api/game/GameTypes";
 import { zNum, zPlayerRef } from "@openfront/engine-lib/snapshot/SnapshotType";
 import { z } from "zod";
 import { Execution, Game, Player } from "../game/Game";
@@ -9,7 +13,13 @@ import type {
   SnapshotReader,
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
+import { AirfieldCoverage } from "./AirMovement";
 
+/**
+ * Sends warships and aircraft to patrol around a new tile. The intent names
+ * the units by id, so one order can move a mixed selection: each unit takes
+ * the order if it can get there.
+ */
 export class MoveWarshipExecution implements Execution {
   constructor(
     private owner: Player,
@@ -26,8 +36,9 @@ export class MoveWarshipExecution implements Execution {
     const newPatrolTileWaterComponent = mg.getWaterComponent(this.position);
     // Cache warship list and build a lookup map — avoids repeated iteration
     const warshipMap = new Map(
-      this.owner.units(UnitType.Warship).map((u) => [u.id(), u]),
+      this.owner.units(PatrolUnits.types).map((u) => [u.id(), u]),
     );
+    let coverage: AirfieldCoverage | undefined;
     // Deduplicate ids so each warship is only moved once
     for (const unitId of new Set(this.unitIds)) {
       const warship = warshipMap.get(unitId);
@@ -39,8 +50,39 @@ export class MoveWarshipExecution implements Execution {
         console.warn(`MoveWarshipExecution: warship ${unitId} is not active`);
         continue;
       }
+      if (Aircraft.has(warship.type())) {
+        // Aircraft fly anywhere within the range of their airfields; an
+        // order beyond it ends at its edge. Drop the target too: a bomber
+        // keeps its structure until it leaves the range of the patrol tile.
+        coverage ??= new AirfieldCoverage(mg, this.owner);
+        const patrolTile = coverage.clamp(this.position);
+        if (patrolTile === undefined) {
+          continue;
+        }
+        warship.updateWarshipState({
+          patrolTile,
+        });
+        warship.setTargetTile(undefined);
+        warship.setTargetUnit(undefined);
+        continue;
+      }
+      if (warship.type() === UnitType.Tank) {
+        // Tanks drive anywhere on land; TankExecution plans the route.
+        if (!mg.isLand(this.position)) {
+          continue;
+        }
+        warship.updateWarshipState({ patrolTile: this.position });
+        warship.setTargetTile(undefined);
+        continue;
+      }
       // Do not update the warship's patrolTile if it is in a different Water Component
-      if (!mg.hasWaterComponent(warship.tile(), newPatrolTileWaterComponent!)) {
+      if (
+        (warship.type() !== UnitType.Warship &&
+          warship.type() !== UnitType.NuclearSubmarine &&
+          warship.type() !== UnitType.AircraftCarrier) ||
+        newPatrolTileWaterComponent === null ||
+        !mg.hasWaterComponent(warship.tile(), newPatrolTileWaterComponent)
+      ) {
         continue;
       }
       warship.updateWarshipState({

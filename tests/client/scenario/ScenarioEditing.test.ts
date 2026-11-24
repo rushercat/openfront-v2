@@ -494,11 +494,11 @@ test("a terrain write over the batch limit goes in several batches", () => {
   expect(doc.terrain.every((b) => b === WATER)).toBe(true);
 });
 
-test("a defense post is the one structure without levels, as the document checks", async () => {
+test("a defense post and a capital are the structures without levels, as the document checks", async () => {
   const { runner } = await engine(newScenarioDocument("Levels", W, H));
   expect(
     Structures.types.filter((t) => !runner.game.unitInfo(t).upgradable),
-  ).toEqual([UnitType.DefensePost]);
+  ).toEqual([UnitType.DefensePost, UnitType.Capital]);
 });
 
 test("a port that loses its shore in one batch of a write goes, and undo keeps the ports the write kept", async () => {

@@ -379,6 +379,31 @@ export class MapRenderer {
     this.renderer?.setSelectedUnits(unitIds);
   }
 
+  /** Outline how far the selected tanks may drive; null hides it. */
+  setTankBuffer(
+    circles: readonly { x: number; y: number; radius: number }[] | null,
+    /** Only the parts of the outline at points this accepts are drawn. */
+    keepAt: ((x: number, y: number) => boolean) | null = null,
+  ): void {
+    this.renderer?.setTankBuffer(circles, keepAt);
+  }
+
+  /** openfront v2: circles of the active map lens; null hides it. */
+  setLensCircles(
+    circles:
+      | readonly {
+          x: number;
+          y: number;
+          radius: number;
+          color: readonly [number, number, number];
+          group: number;
+          alpha?: number;
+        }[]
+      | null,
+  ): void {
+    this.renderer?.setLensCircles(circles);
+  }
+
   /** Flash converging-chevron animation at a warship move target. */
   showMoveIndicator(tileX: number, tileY: number, ownerID: number): void {
     this.renderer?.showMoveIndicator(tileX, tileY, ownerID);

@@ -10,6 +10,8 @@
 
 import { GameRecord, GameRecordSchema } from "@openfront/shared/WireSchemas";
 import { getApiBase } from "../ApiBase";
+import { loadMatchSummary } from "../chronicle/LocalMatchStore";
+import { loadLocalGameRecord } from "../chronicle/LocalReplayRecord";
 import { ClientEnv } from "../ClientEnv";
 
 export type RecordResult =
@@ -17,6 +19,8 @@ export type RecordResult =
   /** Played on another build (or under another record schema). */
   | { kind: "other_build" }
   | { kind: "not_found" }
+  /** A game this browser played whose replay it no longer keeps. */
+  | { kind: "expired" }
   | { kind: "unreachable" };
 
 /**
@@ -42,8 +46,22 @@ export async function fetchReplayRecord(
     handedOver = null;
     return { kind: "record", record };
   }
-  const apiBase = opts.apiBase ?? getApiBase();
   const ownCommit = opts.ownCommit ?? ClientEnv.gitCommit();
+  // openfront v2: a game this browser played is stored here (MatchSession),
+  // so its replay works without the archive.
+  if (opts.fetchFn === undefined) {
+    const local = await loadLocalGameRecord(gameID).catch(() => null);
+    if (local !== null) {
+      if (ownCommit !== "DEV" && local.commit !== ownCommit) {
+        return { kind: "other_build" };
+      }
+      return { kind: "record", record: local.record };
+    }
+    // Only the newest replays are kept unless saved (LocalMatchStore).
+    const summary = await loadMatchSummary(gameID).catch(() => null);
+    if (summary?.replayExpired === true) return { kind: "expired" };
+  }
+  const apiBase = opts.apiBase ?? getApiBase();
   const fetchFn = opts.fetchFn ?? fetch;
   let res: Response;
   try {

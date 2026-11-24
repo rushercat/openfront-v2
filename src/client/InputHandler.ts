@@ -140,6 +140,21 @@ export function highlightTypesForUnit(
       return [UnitType.MissileSilo, UnitType.SAMLauncher];
     case UnitType.Warship:
       return [UnitType.Port];
+    case UnitType.FighterJet:
+    case UnitType.Bomber:
+      return [UnitType.Airfield];
+    case UnitType.Tank:
+      return [UnitType.Factory, UnitType.RailDepot];
+    case UnitType.AircraftCarrier:
+      return [UnitType.Port];
+    case UnitType.CruiseMissile:
+      return [UnitType.MissileSilo, UnitType.SAMLauncher];
+    case UnitType.TransportPlane:
+      return [UnitType.Airfield, UnitType.AADefense];
+    case UnitType.NuclearSubmarine:
+      return [UnitType.Port];
+    case UnitType.RailDepot:
+      return [UnitType.RailDepot, UnitType.Factory];
     case UnitType.MIRV:
       return [UnitType.MissileSilo];
     default:
@@ -209,6 +224,20 @@ export class WarshipSelectionBoxCancelEvent implements GameEvent {}
 
 /** Emitted when the player triggers select-all-warships hotkey */
 export class SelectAllWarshipsEvent implements GameEvent {}
+
+/** Surface the selected nuclear submarines (or all of them if none is). */
+export class SurfaceSubmarinesEvent implements GameEvent {}
+
+/**
+ * A left click on a land tile, offered to the unit selection before it
+ * becomes an attack. Emitted synchronously by ClientGameRunner: a handler
+ * that uses the click (to select an aircraft flying there, or to send the
+ * selected aircraft there) sets `handled`, and the click attacks nobody.
+ */
+export class LandClickEvent implements GameEvent {
+  public handled = false;
+  constructor(public readonly tile: number) {}
+}
 
 /** Emitted when a touch long-press is detected (shows crosshair indicator) */
 export class TouchLongPressStartEvent implements GameEvent {
@@ -546,6 +575,13 @@ export class InputHandler {
     this.addKeybindAndEvent(this.keybinds.selectAllWarships, () => {
       this.eventBus.emit(new SelectAllWarshipsEvent());
     });
+    this.addKeybindAndEvent(
+      this.keybinds.surfaceSubmarine,
+      () => {
+        this.eventBus.emit(new SurfaceSubmarinesEvent());
+      },
+      (e: KeyboardEvent) => !e.altKey && !e.ctrlKey && !e.metaKey,
+    );
     this.addKeybindAndEvent(this.keybinds.requestAlliance, () => {
       this.eventBus.emit(new DoRequestAllianceEvent());
     });
@@ -652,6 +688,20 @@ export class InputHandler {
       "buildHydrogenBomb",
       "buildWarship",
       "buildMIRV",
+      "buildAADefense",
+      "buildAirfield",
+      "buildFighterJet",
+      "buildBomber",
+      "buildRailDepot",
+      "buildTank",
+      "buildNuclearSubmarine",
+      "buildLandMine",
+      "buildSeaMine",
+      "buildRepairStation",
+      "buildAircraftCarrier",
+      "buildCruiseMissile",
+      "buildTransportPlane",
+      "buildCapital",
     ];
     buildKeybinds = buildKeybinds.map((i: string): string => {
       return this.keybinds[i];
@@ -681,9 +731,11 @@ export class InputHandler {
       ],
     );
     buildKeybinds.push(
-      ...buildKeybinds.map((t) => {
-        return "Shift+" + t;
-      }),
+      ...buildKeybinds
+        .filter((t) => !t?.startsWith("Alt+"))
+        .map((t) => {
+          return "Shift+" + t;
+        }),
     );
     buildKeybinds = [...new Set(buildKeybinds)].filter((v): v is string =>
       Boolean(v),
@@ -692,7 +744,15 @@ export class InputHandler {
       this.addKeybindAndEvent(
         i,
         (e: KeyboardEvent) => {
-          const matchedBuild = this.resolveBuildKeybind(e.code, e.shiftKey);
+          // Plain binds ignore Alt, so Alt + number reaches both the plain
+          // and the Alt+ entry: handle the key press once.
+          if (e === this.lastBuildKeyEvent) return;
+          this.lastBuildKeyEvent = e;
+          const matchedBuild = this.resolveBuildKeybind(
+            e.code,
+            e.shiftKey,
+            e.altKey,
+          );
 
           if (matchedBuild !== null) {
             this.setGhostStructure(matchedBuild);
@@ -700,7 +760,7 @@ export class InputHandler {
         },
         () => this.canUseBuildKeybinds(),
         (e: KeyboardEvent) =>
-          this.resolveBuildKeybind(e.code, e.shiftKey) !== null,
+          this.resolveBuildKeybind(e.code, e.shiftKey, e.altKey) !== null,
       );
     }
   }
@@ -1710,11 +1770,21 @@ export class InputHandler {
    * e.g. "Shift+KeyB" → { shift: true, code: "KeyB" }
    *      "KeyB"       → { shift: false, code: "KeyB" }
    */
-  private parseKeybind(value: string): { shift: boolean; code: string } {
+  private lastBuildKeyEvent: KeyboardEvent | null = null;
+
+  private parseKeybind(value: string): {
+    shift: boolean;
+    alt: boolean;
+    code: string;
+  } {
     if (value?.startsWith("Shift+")) {
-      return { shift: true, code: value.slice(6) };
+      return { shift: true, alt: false, code: value.slice(6) };
     }
-    return { shift: false, code: value };
+    // Alt+ binds the third row of the build bar (Alt + number).
+    if (value?.startsWith("Alt+")) {
+      return { shift: false, alt: true, code: value.slice(4) };
+    }
+    return { shift: false, alt: false, code: value };
   }
 
   /**
@@ -1722,11 +1792,14 @@ export class InputHandler {
    * including optional Shift+ prefix support.
    */
   private keybindMatchesEvent(
-    e: KeyboardEvent | { shiftKey: boolean; code: string },
+    e: KeyboardEvent | { shiftKey: boolean; altKey?: boolean; code: string },
     keybindValue: string,
     ignoreShift = false,
   ): boolean {
     const parsed = this.parseKeybind(keybindValue);
+    // Only Alt+ binds care about Alt: Alt is also the reset-graphics
+    // modifier and AltGr types characters, so plain binds ignore it.
+    if (parsed.alt && e.altKey !== true) return false;
     return (
       e.code === parsed.code && (ignoreShift || e.shiftKey === parsed.shift)
     );
@@ -1819,9 +1892,10 @@ export class InputHandler {
     code: string,
     shiftKey: boolean,
     keybindValue: string,
+    altKey = false,
   ): boolean {
     const parsed = this.parseKeybind(keybindValue);
-    if (shiftKey !== parsed.shift) return false;
+    if (shiftKey !== parsed.shift || altKey !== parsed.alt) return false;
     const digit = this.digitFromKeyCode(code);
     const bindDigit = this.digitFromKeyCode(parsed.code);
     return digit !== null && bindDigit !== null && digit === bindDigit;
@@ -1893,6 +1967,7 @@ export class InputHandler {
   private resolveBuildKeybind(
     code: string,
     shiftKey: boolean,
+    altKey = false,
   ): PlayerBuildableUnitType | null {
     const buildKeybinds: ReadonlyArray<{
       key: string;
@@ -1908,13 +1983,47 @@ export class InputHandler {
       { key: "buildHydrogenBomb", type: UnitType.HydrogenBomb },
       { key: "buildWarship", type: UnitType.Warship },
       { key: "buildMIRV", type: UnitType.MIRV },
+      { key: "buildAADefense", type: UnitType.AADefense },
+      { key: "buildAirfield", type: UnitType.Airfield },
+      { key: "buildFighterJet", type: UnitType.FighterJet },
+      { key: "buildBomber", type: UnitType.Bomber },
+      { key: "buildRailDepot", type: UnitType.RailDepot },
+      { key: "buildTank", type: UnitType.Tank },
+      { key: "buildNuclearSubmarine", type: UnitType.NuclearSubmarine },
+      { key: "buildLandMine", type: UnitType.LandMine },
+      { key: "buildSeaMine", type: UnitType.SeaMine },
+      { key: "buildRepairStation", type: UnitType.RepairStation },
+      { key: "buildAircraftCarrier", type: UnitType.AircraftCarrier },
+      { key: "buildCruiseMissile", type: UnitType.CruiseMissile },
+      { key: "buildTransportPlane", type: UnitType.TransportPlane },
+      { key: "buildCapital", type: UnitType.Capital },
     ];
-    for (const { key, type } of buildKeybinds) {
-      if (this.keybindMatchesEvent({ code, shiftKey }, this.keybinds[key]))
+    // An Alt+ bind first: Alt + number is the third row.
+    const ordered = altKey
+      ? [
+          ...buildKeybinds.filter(({ key }) =>
+            this.keybinds[key]?.startsWith("Alt+"),
+          ),
+          ...buildKeybinds.filter(
+            ({ key }) => !this.keybinds[key]?.startsWith("Alt+"),
+          ),
+        ]
+      : buildKeybinds;
+    for (const { key, type } of ordered) {
+      if (
+        this.keybindMatchesEvent({ code, shiftKey, altKey }, this.keybinds[key])
+      )
         return type;
     }
-    for (const { key, type } of buildKeybinds) {
-      if (this.buildKeybindMatchesDigit(code, shiftKey, this.keybinds[key]))
+    for (const { key, type } of ordered) {
+      if (
+        this.buildKeybindMatchesDigit(
+          code,
+          shiftKey,
+          this.keybinds[key],
+          altKey,
+        )
+      )
         return type;
     }
     return null;

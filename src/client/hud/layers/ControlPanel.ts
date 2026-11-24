@@ -21,6 +21,11 @@ import { getGamesPlayed, translateText } from "../../Utils";
 import { GameView } from "../../view";
 import { PlayerView } from "../../view/PlayerView";
 import { goldCoinIcon, soldierIcon } from "../HotbarIcons";
+import {
+  goldBreakdown,
+  tradeTracker,
+  troopBreakdown,
+} from "../IncomeBreakdown";
 import { OnboardingLowTroopsEvent } from "../Onboarding";
 import { TutorialHighlight, TutorialHighlightEvent } from "../Tutorial";
 const swordIcon = assetUrl("images/SwordIcon.svg");
@@ -76,7 +81,15 @@ export class ControlPanel extends LitElement implements Controller {
   @state()
   private _lowTroopsAlert = false;
 
+  /** openfront v2: which income breakdown is open (hover or tap). */
+  @state()
+  private _breakdown: "troops" | "gold" | null = null;
+  private _breakdownPinned = false;
+
   private _troopRateIsIncreasing: boolean = true;
+  /** Freshly conquered share of the player's land, percent (unrest). */
+  private _unrestPercent = 0;
+  private _hasCapital = false;
 
   private _lastTroopIncreaseRate: number;
 
@@ -184,6 +197,10 @@ export class ControlPanel extends LitElement implements Controller {
       .map((a) => a.troops)
       .reduce((a, b) => a + b, 0);
     this.troopRate = config.troopIncreaseRate(player) * 10;
+    this._unrestPercent = Math.round(player.unrestShare() * 100);
+    this._hasCapital = config.hasCapital(player);
+    // Keeps the trade-income window filled for the breakdown and hotbar.
+    tradeTracker(this.game);
 
     const helpEnabled = new UserSettings().helpMessages();
 
@@ -637,6 +654,89 @@ export class ControlPanel extends LitElement implements Controller {
     `;
   }
 
+  // ── openfront v2: income breakdown ─────────────────────────────────────
+
+  private onBreakdownEnter(e: PointerEvent, kind: "troops" | "gold") {
+    if (e.pointerType === "touch" || this._breakdownPinned) return;
+    this._breakdown = kind;
+  }
+
+  private onBreakdownLeave(e: PointerEvent) {
+    if (e.pointerType === "touch" || this._breakdownPinned) return;
+    this._breakdown = null;
+  }
+
+  /** A click (or tap) pins the breakdown open until the next click. */
+  private toggleBreakdown(kind: "troops" | "gold") {
+    if (this._breakdownPinned && this._breakdown === kind) {
+      this._breakdownPinned = false;
+      this._breakdown = null;
+      return;
+    }
+    this._breakdownPinned = true;
+    this._breakdown = kind;
+  }
+
+  /** Why troops / gold grow as fast as they do, factor by factor. */
+  private renderBreakdown(kind: "troops" | "gold") {
+    const player = this.game?.myPlayer();
+    if (!player) return nothing;
+    const b =
+      kind === "troops"
+        ? troopBreakdown(this.game, player)
+        : goldBreakdown(this.game, player);
+    const toneClass = (tone: string) =>
+      tone === "pos"
+        ? "text-green-400"
+        : tone === "neg"
+          ? "text-orange-400"
+          : "text-white/80";
+    const total =
+      kind === "troops"
+        ? `+${renderTroops(b.total)}/s`
+        : `≈ +${renderNumber(BigInt(Math.round(b.total)))}/s`;
+    return html`
+      <div
+        class="absolute bottom-full mb-2 ${
+          kind === "gold" ? "right-0" : "left-0"
+        } z-50 w-64 rounded-lg bg-gray-900/95 border border-white/15 shadow-xl p-2 text-xs font-normal text-white cursor-default"
+        @click=${(e: Event) => e.stopPropagation()}
+      >
+        <div
+          class="font-bold text-sm mb-1 ${
+            kind === "gold" ? "text-yellow-300" : "text-green-300"
+          }"
+        >
+          ${translateText(
+            kind === "troops" ? "income.troops_title" : "income.gold_title",
+          )}
+        </div>
+        ${b.lines.map(
+          (l) =>
+            html`<div class="flex justify-between gap-2 py-0.5">
+              <span class="text-white/80">${l.label}</span>
+              <span class="tabular-nums whitespace-nowrap ${toneClass(l.tone)}"
+                >${l.value}</span
+              >
+            </div>`,
+        )}
+        <div
+          class="flex justify-between gap-2 border-t border-white/15 mt-1 pt-1 font-bold"
+        >
+          <span>${translateText("income.total")}</span>
+          <span class="tabular-nums">${total}</span>
+        </div>
+        ${
+          kind === "gold"
+            ? html`<div class="text-[10px] text-white/50 mt-1">
+                ${translateText("income.gold_hint")}
+              </div>`
+            : nothing
+        }
+      </div>
+    `;
+  }
+
   private renderDesktop() {
     return html`
       ${this.renderNotification()}
@@ -644,7 +744,7 @@ export class ControlPanel extends LitElement implements Controller {
       <div class="flex gap-1.5 items-center mb-1">
         <!-- Troop rate -->
         <div
-          class="flex items-center gap-1 shrink-0 border rounded-md font-bold text-sm py-0.5 px-1 w-[5.5rem] ${this.tutorialHighlightClass(
+          class="relative flex items-center gap-1 shrink-0 border rounded-md font-bold text-sm py-0.5 px-1 w-[5.5rem] ${this.tutorialHighlightClass(
             "troop_rate",
           )} ${
             this._troopRateIsIncreasing
@@ -652,7 +752,19 @@ export class ControlPanel extends LitElement implements Controller {
               : "border-orange-400"
           }"
           translate="no"
+          @pointerenter=${(e: PointerEvent) => this.onBreakdownEnter(e, "troops")}
+          @pointerleave=${(e: PointerEvent) => this.onBreakdownLeave(e)}
+          @click=${() => this.toggleBreakdown("troops")}
         >
+          ${this._breakdown === "troops" ? this.renderBreakdown("troops") : nothing}
+          ${
+            this._unrestPercent >= 5
+              ? html`<span
+                  class="absolute -top-2 -right-2 rounded bg-orange-600 px-1 text-[9px] leading-tight text-white"
+                  >${this._unrestPercent}%</span
+                >`
+              : ""
+          }
           <img
             src=${soldierIcon}
             alt=""
@@ -679,11 +791,15 @@ export class ControlPanel extends LitElement implements Controller {
         </div>
         <!-- Gold -->
         <div
-          class="flex items-center gap-1 shrink-0 border rounded-md border-yellow-400 font-bold text-yellow-400 text-sm py-0.5 px-1 min-w-[4.5rem] relative ${this.tutorialHighlightClass(
+          class="flex items-center gap-1 shrink-0 border rounded-md border-yellow-400 font-bold text-yellow-400 text-sm py-0.5 px-1 min-w-[4.5rem] relative cursor-help ${this.tutorialHighlightClass(
             "gold",
           )}"
           translate="no"
+          @pointerenter=${(e: PointerEvent) => this.onBreakdownEnter(e, "gold")}
+          @pointerleave=${(e: PointerEvent) => this.onBreakdownLeave(e)}
+          @click=${() => this.toggleBreakdown("gold")}
         >
+          ${this._breakdown === "gold" ? this.renderBreakdown("gold") : nothing}
           ${
             this._goldGain !== null
               ? keyed(
@@ -764,7 +880,11 @@ export class ControlPanel extends LitElement implements Controller {
             "gold",
           )}"
           translate="no"
+          @pointerenter=${(e: PointerEvent) => this.onBreakdownEnter(e, "gold")}
+          @pointerleave=${(e: PointerEvent) => this.onBreakdownLeave(e)}
+          @click=${() => this.toggleBreakdown("gold")}
         >
+          ${this._breakdown === "gold" ? this.renderBreakdown("gold") : nothing}
           ${
             this._goldGain !== null
               ? keyed(

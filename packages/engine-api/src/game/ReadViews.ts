@@ -6,6 +6,7 @@ import {
   TerraNullius,
   UnitType,
 } from "./GameTypes";
+import { PoliticsFactor } from "./Politics";
 
 /*
  * Read-only views of game state that rules code (Config, UnitGrid,
@@ -27,6 +28,16 @@ export interface PlayerLike {
   troops(): number;
   gold(): Gold;
   units(type: UnitType): readonly UnitLike[];
+  /**
+   * Freshly conquered land as a share of the player's land, 0 to 1 (unrest).
+   * Optional: views that don't track it count as calm.
+   */
+  unrestShare?(): number;
+  /**
+   * Multiplier the decrees in force put on this player's income or troop
+   * growth (see game/Politics). Optional: views that don't track it count 1.
+   */
+  politicsFactor?(kind: PoliticsFactor): number;
 }
 
 export interface UnitLike {
@@ -37,6 +48,10 @@ export interface UnitLike {
   isActive(): boolean;
   isUnderConstruction(): boolean;
   level(): number;
+  /** Whether the unit type has health at all (structures, warships, aircraft). */
+  hasHealth(): boolean;
+  /** Current health; damaged structures earn and hold less (UnitHealth). */
+  health(): number;
 }
 
 export interface GameLike extends GameMap {

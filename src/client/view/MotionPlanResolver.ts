@@ -143,6 +143,15 @@ export class MotionPlanResolver {
     }
   }
 
+  /**
+   * The engine froze this tick (a congress vote, Politics): nothing moved.
+   * Every plan slides back by one tick so it resumes where it stopped.
+   */
+  hold(tick: number): void {
+    for (const plan of this.grid.values()) plan.startTick++;
+    for (const plan of this.trains.values()) plan.lastAdvancedTick = tick;
+  }
+
   /** Advance every plan to `tick`. */
   advance(tick: number, units: PlannedUnits): void {
     this.advanceGrid(tick, units);

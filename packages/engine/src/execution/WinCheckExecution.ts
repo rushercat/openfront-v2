@@ -33,6 +33,12 @@ export class WinCheckExecution implements Execution {
     }
     if (this.mg === null) throw new Error("Not initialized");
 
+    // Someone already won another way (a scenario mission).
+    if (this.mg.getWinner() !== null) {
+      this.active = false;
+      return;
+    }
+
     if (this.checkRankedTeamCancelled()) {
       return;
     }

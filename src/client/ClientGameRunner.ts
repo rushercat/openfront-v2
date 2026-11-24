@@ -1,6 +1,7 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
 import {
   BuildableUnit,
+  CustomGameMap,
   PlayerType,
   Structures,
   UnitType,
@@ -11,7 +12,7 @@ import {
   GameUpdateViewData,
   HashUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
-import { ClientID, GameID } from "@openfront/engine-api/Schemas";
+import { ClientID, GameID, Turn } from "@openfront/engine-api/Schemas";
 import { Config } from "@openfront/engine-lib/configuration/Config";
 import { TerrainMapData } from "@openfront/engine-lib/game/TerrainMapLoader";
 import { findClosestBy } from "@openfront/engine-lib/Util";
@@ -33,8 +34,19 @@ import {
 import { ClientEnv } from "../client/ClientEnv";
 import { reloadForUpdate, translateText } from "../client/Utils";
 import { rememberAdmitted } from "./AdmittedLobbies";
+import {
+  currentMatchSession,
+  endMatchSession,
+  MatchSession,
+  startMatchSession,
+} from "./chronicle/MatchSession";
 import { MapLayerController } from "./controllers/MapLayerController";
 import { isDesktopShell } from "./DesktopShell";
+import {
+  FramePacer,
+  notifyFrameDrawn,
+  registerFrameDriver,
+} from "./FramePacer";
 import { GameHealth } from "./GameHealth";
 import { GameMetrics } from "./GameMetrics";
 import { createRenderer, GameRenderer } from "./hud/GameRenderer";
@@ -53,6 +65,7 @@ import {
   DoTargetPlayerEvent,
   InputHandler,
   MouseMoveEvent,
+  LandClickEvent,
   MouseUpEvent,
   TickMetricsEvent,
   ToggleRenderDebugGuiEvent,
@@ -102,6 +115,7 @@ import {
 } from "./Transport";
 import {
   GRAPHICS_KEY,
+  MAX_FPS_KEY,
   USER_SETTINGS_CHANGED_EVENT,
   UserSettings,
 } from "./UserSettings";
@@ -217,14 +231,15 @@ export function joinLobby(
   const requestTerrainLoad = (
     map: Parameters<typeof loadCachedTerrainMap>[0],
     mapSize: Parameters<typeof loadCachedTerrainMap>[1],
+    customMapId?: string,
   ): Promise<TerrainMapData> => {
-    const key = `${map}:${mapSize}`;
+    const key = `${map}:${mapSize}:${customMapId ?? ""}`;
     const existing = terrainLoads.get(key);
     if (existing !== undefined) {
       terrainLoad = existing;
       return existing;
     }
-    const load = loadCachedTerrainMap(map, mapSize);
+    const load = loadCachedTerrainMap(map, mapSize, customMapId);
     terrainLoads.set(key, load);
     terrainLoad = load;
     void load.catch((e) => {
@@ -289,7 +304,7 @@ export function joinLobby(
         pendingPreloadKey = null;
         pendingPreloadStreak = 0;
       } else {
-        const key = `${gameConfig.gameMap}:${gameConfig.gameMapSize}`;
+        const key = `${gameConfig.gameMap}:${gameConfig.gameMapSize}:${gameConfig.customMapId ?? ""}`;
         if (pendingPreloadKey === key) {
           pendingPreloadStreak++;
         } else {
@@ -297,7 +312,11 @@ export function joinLobby(
           pendingPreloadStreak = 1;
         }
         if (pendingPreloadStreak >= MAP_PRELOAD_DEBOUNCE_STREAK) {
-          void requestTerrainLoad(gameConfig.gameMap, gameConfig.gameMapSize);
+          void requestTerrainLoad(
+            gameConfig.gameMap,
+            gameConfig.gameMapSize,
+            gameConfig.customMapId,
+          );
         }
       }
       return;
@@ -306,6 +325,8 @@ export function joinLobby(
       console.log(
         `lobby: game prestarting: ${JSON.stringify(message, replacer)}`,
       );
+      // (A game on an uploaded custom map sends no prestart: its map is
+      // named by the start's config, and the lobby broadcasts preload it.)
       void requestTerrainLoad(message.gameMap, message.gameMapSize);
       prestarted = true;
       resolvePrestart();
@@ -622,6 +643,28 @@ function createWebGLView(
   return { view, glCanvas, cachedWebGLFrameCallback };
 }
 
+/**
+ * The player's frame cap, kept current without reading storage on every
+ * animation frame; `onChange` also hears the initial value.
+ */
+function maxFpsSetting(
+  userSettings: UserSettings,
+  signal: AbortSignal,
+  onChange: (cap: number) => void,
+): () => number {
+  let cap = userSettings.maxFps();
+  onChange(cap);
+  globalThis.addEventListener(
+    `${USER_SETTINGS_CHANGED_EVENT}:${MAX_FPS_KEY}`,
+    () => {
+      cap = userSettings.maxFps();
+      onChange(cap);
+    },
+    { signal },
+  );
+  return () => cap;
+}
+
 function mountWebGLFrameLoop(
   terrainMap: TerrainMapData,
   view: MapRenderer,
@@ -631,6 +674,7 @@ function mountWebGLFrameLoop(
   gameView: GameView,
   eventBus: EventBus,
   onFrame: (nowMs: number) => void,
+  maxFps: () => number,
 ): { builder: WebGLFrameBuilder; stopFrameLoop: () => void } {
   const gameMap = terrainMap.gameMap;
   const mapWidth = gameMap.width();
@@ -688,13 +732,23 @@ function mountWebGLFrameLoop(
 
   // Self-driving RAF: syncCamera reads the latest camera state from
   // TransformHandler, pushes it to WebGL, and synchronously invokes the
-  // renderer's captured frame callback (which draws). One RAF = one
-  // synchronized camera-update + WebGL render.
+  // renderer's captured frame callback (which draws). One drawn RAF = one
+  // synchronized camera-update + WebGL render. The pacer skips the RAFs
+  // above the player's frame cap (FramePacer: a 240/540 Hz display would
+  // otherwise redraw the whole map 240/540 times a second).
+  const pacer = new FramePacer(maxFps);
+  const unregisterFrameDriver = registerFrameDriver();
+  const onVisibility = (): void => {
+    if (document.hidden) pacer.reset();
+  };
+  document.addEventListener("visibilitychange", onVisibility);
   let rafId: number | null = null;
   const driveFrame = (nowMs: number): void => {
+    rafId = requestAnimationFrame(driveFrame);
+    if (!pacer.shouldDraw(nowMs)) return;
     onFrame(nowMs);
     syncCamera();
-    rafId = requestAnimationFrame(driveFrame);
+    notifyFrameDrawn(nowMs);
   };
   rafId = requestAnimationFrame(driveFrame);
 
@@ -707,6 +761,8 @@ function mountWebGLFrameLoop(
       cancelAnimationFrame(rafId);
       rafId = null;
     }
+    unregisterFrameDriver();
+    document.removeEventListener("visibilitychange", onVisibility);
     resizeObs.disconnect();
   };
 
@@ -739,12 +795,25 @@ async function createClientGame(
   );
   let gameMap: TerrainMapData;
 
-  if (terrainLoad) {
+  const startConfig = lobbyConfig.gameStartInfo.config;
+  if (
+    startConfig.gameMap === CustomGameMap &&
+    startConfig.customMapId !== undefined
+  ) {
+    // An uploaded custom map: make sure the one the start names is the
+    // loaded one (a preload may have been for another), before the worker
+    // reads the Custom map's files.
+    gameMap = await loadCachedTerrainMap(
+      startConfig.gameMap,
+      startConfig.gameMapSize,
+      startConfig.customMapId,
+    );
+  } else if (terrainLoad) {
     gameMap = await terrainLoad;
   } else {
     gameMap = await loadCachedTerrainMap(
-      lobbyConfig.gameStartInfo.config.gameMap,
-      lobbyConfig.gameStartInfo.config.gameMapSize,
+      startConfig.gameMap,
+      startConfig.gameMapSize,
     );
   }
   if (isStopped?.()) return;
@@ -920,6 +989,18 @@ async function createClientGame(
       }
     });
 
+    // Records the game for its replay, the event log and the statistics
+    // (chronicle/MatchSession). A replay records nothing.
+    if (!config.isReplay()) {
+      startMatchSession(
+        new MatchSession(
+          lobbyConfig.gameStartInfo,
+          clientID ?? null,
+          lobbyConfig.snapshot === undefined,
+        ),
+      );
+    }
+
     const gameRenderer = createRenderer(
       inputOverlay,
       gameView,
@@ -944,6 +1025,9 @@ async function createClientGame(
         metrics.recordFrame(nowMs);
         health.recordFrame(nowMs);
       },
+      maxFpsSetting(userSettings, graphicsListenerAbort.signal, (cap) =>
+        health.setFrameCap(cap),
+      ),
     );
 
     // Releases all WebGL/DOM resources this game created. Without it, stopping
@@ -1154,6 +1238,7 @@ export class ClientGameRunner {
       this.transport.turnComplete();
       gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
         this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
+        currentMatchSession()?.recordHash(hu.tick, hu.hash);
       });
       this.gameView.update(gu);
       const pauseUpdates = gu.updates[GameUpdateType.GamePaused];
@@ -1230,13 +1315,13 @@ export class ClientGameRunner {
             continue;
           }
           while (turn.turnNumber - 1 > this.turnsSeen) {
-            this.worker.sendTurn({
+            this.feedTurn({
               turnNumber: this.turnsSeen,
               intents: [],
             });
             this.turnsSeen++;
           }
-          this.worker.sendTurn(turn);
+          this.feedTurn(turn);
           this.turnsSeen++;
         }
       }
@@ -1310,7 +1395,7 @@ export class ClientGameRunner {
             `got wrong turn have turns ${this.turnsSeen}, received turn ${message.turn.turnNumber}`,
           );
         } else {
-          this.worker.sendTurn(
+          this.feedTurn(
             // Filter out pause intents in replays
             this.gameView.config().isReplay()
               ? {
@@ -1383,6 +1468,8 @@ export class ClientGameRunner {
     // disposals around it.
     this.input.destroy();
     this.disposeRenderer?.();
+    // Saves the game one last time (for its replay and statistics).
+    endMatchSession();
     // Terminate the worker even if the runner never started (a lobby left while
     // it was loading), otherwise nothing else would ever stop it. Idempotent.
     this.worker.cleanup();
@@ -1399,6 +1486,12 @@ export class ClientGameRunner {
       clearTimeout(this.goToPlayerTimeout);
       this.goToPlayerTimeout = null;
     }
+  }
+
+  /** Hands a turn to the simulation and records it for the replay. */
+  private feedTurn(turn: Turn): void {
+    this.worker.sendTurn(turn);
+    currentMatchSession()?.addTurn(turn);
   }
 
   private inputEvent(event: MouseUpEvent) {
@@ -1431,6 +1524,13 @@ export class ClientGameRunner {
       const myPlayer = this.gameView.playerByClientID(this.clientID);
       if (myPlayer === null) return;
       this.myPlayer = myPlayer;
+    }
+    // Aircraft fly over land: a click there may be meant for one of them
+    // (WarshipSelectionController), not as an attack on the land's owner.
+    if (this.gameView.isLand(tile)) {
+      const landClick = new LandClickEvent(tile);
+      this.eventBus.emit(landClick);
+      if (landClick.handled) return;
     }
     this.myPlayer
       .actions(tile, [UnitType.TransportShip])

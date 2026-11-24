@@ -113,8 +113,20 @@ float sdPolygon(vec2 p, float R, float n, float rot) {
   return length(p) * cos(a) - R * cos(an);
 }
 
+// Plus sign (rounded arms) inscribed in radius R.
+float sdCross(vec2 p, float R) {
+  p = abs(p);
+  if (p.y > p.x) p = p.yx;
+  float arm = R * 0.42;
+  vec2 q = p - vec2(R * 0.92, arm);
+  float k = max(q.y, q.x);
+  vec2 w = (k > 0.0) ? q : vec2(arm - p.x, -k);
+  return sign(k) * length(max(w, 0.0)) - R * 0.08;
+}
+
 // Per-structure-type shape SDF.
-// Atlas indices: 0=City, 1=Port, 2=Factory, 3=DefensePost, 4=SAM, 5=Silo
+// Atlas indices: 0=City, 1=Port, 2=Factory, 3=DefensePost, 4=SAM, 5=Silo,
+// 6=AA Defense, 7=Airfield, 8=Rail Depot, 9=Repair Station
 float shapeSDF(vec2 p, float R) {
   if (vAtlasIdx < 0.5)
     return length(p) - R;                     // City → circle
@@ -126,7 +138,13 @@ float shapeSDF(vec2 p, float R) {
     return sdPolygon(p, R, 8.0, 0.0);         // Defense Post → octagon (flat top)
   if (vAtlasIdx < 4.5)
     return sdPolygon(p, R, 4.0, 0.0);         // SAM Launcher → square (flat sides)
-  return sdPolygon(p, R, 3.0, PI * 0.5);      // Missile Silo → triangle (vertex up)
+  if (vAtlasIdx < 5.5)
+    return sdPolygon(p, R, 3.0, PI * 0.5);    // Missile Silo → triangle (vertex up)
+  if (vAtlasIdx < 6.5)
+    return sdPolygon(p, R, 4.0, PI * 0.25);   // AA Defense → diamond (vertex up)
+  if (vAtlasIdx > 8.5)
+    return sdCross(p, R);                     // Repair Station → plus sign
+  return sdPolygon(p, R, 7.0, PI * 0.5);      // Airfield / Rail Depot → heptagon
 }
 
 void main() {

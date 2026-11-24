@@ -2,6 +2,7 @@ import { TileRef } from "@openfront/engine-api/game/GameMap";
 import {
   Difficulty,
   PlayerType,
+  Structures,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
@@ -116,26 +117,117 @@ export class NationStructurePlacement {
       case UnitType.City:
         return this.cityValue();
       case UnitType.MissileSilo:
-        return this.missileSiloValue();
+        return this.missileSiloValue(UnitType.MissileSilo);
+      // An airfield wants what a silo wants: high ground, away from the
+      // border and from the next airfield.
+      case UnitType.Airfield:
+        return this.missileSiloValue(UnitType.Airfield);
+      case UnitType.AADefense:
+        return this.aaDefenseValue();
       case UnitType.Factory:
         return this.factoryValue();
       case UnitType.Port:
         return this.portValue();
       case UnitType.SAMLauncher:
         return this.samLauncherValue();
+      case UnitType.RepairStation:
+        return this.repairStationValue();
       default:
         throw new Error(`Value function not implemented for ${type}`);
     }
   }
 
   /**
-   * Value function for MissileSilo.
+   * Value function for Repair Stations: as many structures in range as
+   * possible that no station of ours reaches yet (the more damage, the
+   * better), and well away from our other stations. Stations don't add up
+   * (a structure heals by the best one in reach), so a second one next to
+   * the first is wasted gold.
+   */
+  private repairStationValue(): (tile: TileRef) => number {
+    const game = this.game;
+    const config = game.config();
+    const range = config.repairStationRange(1);
+    const rangeSquared = range * range;
+    const { structureSpacing } = this.spacingConstants();
+    const stations = this.player.units(UnitType.RepairStation);
+    const covered = (tile: TileRef) =>
+      stations.some((s) => {
+        const r = config.repairStationRange(s.level());
+        return game.euclideanDistSquared(s.tile(), tile) <= r * r;
+      });
+    const targets: { tile: TileRef; weight: number }[] = [];
+    for (const unit of this.player.units(Structures.types)) {
+      if (unit.type() === UnitType.RepairStation || !unit.hasHealth()) continue;
+      if (covered(unit.tile())) continue;
+      const damage = 1 - unit.health() / Math.max(1, unit.maxHealth());
+      targets.push({ tile: unit.tile(), weight: 1 + 10 * damage });
+    }
+    return (tile) => {
+      let w = 0;
+      for (const t of targets) {
+        if (game.euclideanDistSquared(tile, t.tile) <= rangeSquared) {
+          w += structureSpacing * t.weight;
+        }
+      }
+      // Overlapping another station's reach only wastes coverage.
+      for (const s of stations) {
+        const d = Math.sqrt(game.euclideanDistSquared(tile, s.tile()));
+        if (d < range) w -= structureSpacing * 20 * (1 - d / range);
+      }
+      return w;
+    };
+  }
+
+  /**
+   * Value function for AA Defenses.
+   * Prefers to have many of the nation's other structures in range (more for
+   * upgraded ones), and spacing from the other AA Defenses.
+   */
+  private aaDefenseValue(): (tile: TileRef) => number {
+    const game = this.game;
+    const player = this.player;
+    const otherUnits = player.units(UnitType.AADefense);
+    const { structureSpacing } = this.spacingConstants();
+    const range = game.config().aaDefenseRange();
+    const rangeSquared = range * range;
+    const protect: { tile: TileRef; weight: number }[] = [];
+    for (const unit of player.units(Structures.types)) {
+      if (unit.type() !== UnitType.AADefense) {
+        protect.push({ tile: unit.tile(), weight: unit.level() });
+      }
+    }
+
+    return (tile) => {
+      let w = 0;
+
+      // Prefer to be away from other structures of the same type
+      const otherTiles: Set<TileRef> = new Set(otherUnits.map((u) => u.tile()));
+      otherTiles.delete(tile);
+      const d = nearestTileDist(game, otherTiles, tile);
+      if (d !== Infinity) w += Math.min(d, structureSpacing);
+
+      // Prefer to be in range of the structures to protect
+      for (const entry of protect) {
+        if (game.euclideanDistSquared(tile, entry.tile) <= rangeSquared) {
+          w += structureSpacing * entry.weight;
+        }
+      }
+
+      return w;
+    };
+  }
+
+  /**
+   * Value function for MissileSilo (and Airfield).
    * Prefers high elevation, distance from border, and spacing from same-type structures.
    */
-  private missileSiloValue(): (tile: TileRef) => number {
+  private missileSiloValue(
+    type: UnitType.MissileSilo | UnitType.Airfield,
+  ): (tile: TileRef) => number {
     const game = this.game;
     const borderTiles = this.player.borderTiles();
-    const otherUnits = this.player.units(UnitType.MissileSilo);
+    const otherUnits = this.player.units(type);
     const { borderSpacing, structureSpacing } = this.spacingConstants();
 
     return (tile) => {
@@ -472,16 +564,35 @@ export class NationStructurePlacement {
       difficulty === Difficulty.Hard || difficulty === Difficulty.Impossible;
 
     const protectEntries: { tile: TileRef; weight: number }[] = [];
-    for (const unit of player.units()) {
-      switch (unit.type()) {
-        case UnitType.City:
-        case UnitType.Factory:
-        case UnitType.MissileSilo:
-        case UnitType.Port:
-          protectEntries.push({
-            tile: unit.tile(),
-            weight: weightByLevel ? unit.level() : 1,
-          });
+    // Hard & Impossible also cover their teammates' structures next door: a
+    // team guards its clusters together.
+    const guarded = weightByLevel
+      ? [
+          player,
+          ...game
+            .players()
+            .filter((p) => p !== player && player.isOnSameTeam(p)),
+        ]
+      : [player];
+    for (const owner of guarded) {
+      for (const unit of owner.units()) {
+        switch (unit.type()) {
+          case UnitType.City:
+          case UnitType.Factory:
+          case UnitType.MissileSilo:
+          case UnitType.Port:
+            protectEntries.push({
+              tile: unit.tile(),
+              weight: weightByLevel
+                ? unit.level() *
+                  // Ports and silos are what nukes go for
+                  (unit.type() === UnitType.Port ||
+                  unit.type() === UnitType.MissileSilo
+                    ? 1.5
+                    : 1)
+                : 1,
+            });
+        }
       }
     }
     const range = game.config().defaultSamRange();
@@ -494,7 +605,10 @@ export class NationStructurePlacement {
     let structureCoverage: Map<TileRef, number> | null = null;
     if (useCoverageWeighting) {
       structureCoverage = new Map<TileRef, number>();
-      const existingSams = player.units(UnitType.SAMLauncher);
+      // Teammates' SAMs guard the same clusters (Hard & Impossible)
+      const existingSams = guarded.flatMap((p) =>
+        p.units(UnitType.SAMLauncher),
+      );
       for (const entry of protectEntries) {
         let coverageScore = 0;
         for (const sam of existingSams) {

@@ -25,6 +25,7 @@
  *                        [--no-cpu-profile] [--no-exec-profile]
  *                        [--no-gc-profile] [--no-alloc-profile]
  *                        [--footprint] [--snapshot-at 0,2000,12000]
+ *                        [--difficulty impossible] [--teams 2] [--private]
  *
  * --footprint records the live heap (used heap after a forced full GC) at
  * every --window boundary; it requires NODE_OPTIONS=--expose-gc.
@@ -98,6 +99,9 @@ interface Options {
   footprint: boolean;
   snapshotAt: number[];
   waterNukes: boolean;
+  difficulty: Difficulty;
+  teams: number | undefined;
+  private: boolean;
 }
 
 function resolveMap(name: string): GameMapType {
@@ -129,6 +133,9 @@ function parseArgs(argv: string[]): Options {
     footprint: false,
     snapshotAt: [],
     waterNukes: false,
+    difficulty: Difficulty.Medium,
+    teams: undefined,
+    private: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -185,6 +192,19 @@ function parseArgs(argv: string[]): Options {
       case "--water-nukes":
         opts.waterNukes = true;
         break;
+      case "--difficulty": {
+        const v = next().toLowerCase();
+        const key = Object.keys(Difficulty).find((k) => k.toLowerCase() === v);
+        if (key === undefined) throw new Error(`unknown difficulty "${v}"`);
+        opts.difficulty = Difficulty[key as keyof typeof Difficulty];
+        break;
+      }
+      case "--private":
+        opts.private = true;
+        break;
+      case "--teams":
+        opts.teams = parseInt(next(), 10);
+        break;
       default:
         throw new Error(`unknown argument: ${arg}`);
     }
@@ -223,9 +243,10 @@ async function main(): Promise<void> {
   const gameConfig: GameConfig = {
     gameMap: opts.map,
     gameMapSize: GameMapSize.Normal,
-    gameMode: GameMode.FFA,
-    gameType: GameType.Public,
-    difficulty: Difficulty.Medium,
+    gameMode: opts.teams !== undefined ? GameMode.Team : GameMode.FFA,
+    playerTeams: opts.teams,
+    gameType: opts.private ? GameType.Private : GameType.Public,
+    difficulty: opts.difficulty,
     nations: opts.nations,
     donateGold: false,
     donateTroops: false,
@@ -477,6 +498,33 @@ async function main(): Promise<void> {
           ]),
       ),
     );
+    const slow = new Map<string, { count: number; ms: number; max: number }>();
+    for (const c of execProfiler.slowCalls) {
+      const e = slow.get(c.name) ?? { count: 0, ms: 0, max: 0 };
+      e.count++;
+      e.ms += c.ms;
+      e.max = Math.max(e.max, c.ms);
+      slow.set(c.name, e);
+    }
+    if (slow.size > 0) {
+      console.log(
+        `\nSingle calls over ${ExecutionProfiler.SLOW_CALL_MS}ms (spike sources):`,
+      );
+      console.log(
+        table(
+          ["execution", "calls", "total ms", "max ms"],
+          [...slow.entries()]
+            .sort((a, b) => b[1].ms - a[1].ms)
+            .slice(0, opts.top)
+            .map(([name, e]) => [
+              name,
+              String(e.count),
+              fmtMs(e.ms),
+              fmtMs(e.max),
+            ]),
+        ),
+      );
+    }
     console.log(
       `(execution total ${fmtMs(grandTotal)}ms, includes spawn phase; ` +
         `remainder of tick time is player updates, hashing, and tile updates)`,

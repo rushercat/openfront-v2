@@ -1,4 +1,5 @@
 import {
+  CustomGameMap,
   GameMode,
   GameType,
   HumansVsNations,
@@ -82,6 +83,7 @@ import { poolTargetFor } from "./PoolRouting";
 import { Roster } from "./Roster";
 import { ServerEnv } from "./ServerEnv";
 import { SocketIngress } from "./SocketIngress";
+import { TurnClock } from "./TurnClock";
 import {
   LONE_VOTER_REPLAY_CAP,
   replayWinnerInChild,
@@ -241,7 +243,7 @@ export class GameServer {
   private _startTime: number | null = null;
   private hasReachedMaxPlayerCount: boolean = false;
 
-  private endTurnIntervalID: ReturnType<typeof setInterval> | undefined;
+  private turnClock: TurnClock | undefined;
 
   private lastPingUpdate = 0;
 
@@ -987,6 +989,11 @@ export class GameServer {
     }
     this.stage = "prestart";
     this.fetchTribes();
+    // An uploaded custom map can't be named in a prestart (stock maps only):
+    // its players preload it from the lobby's config instead.
+    if (this.gameConfig.gameMap === CustomGameMap) {
+      return;
+    }
 
     const prestartMsg = ServerPrestartMessageSchema.safeParse({
       type: "prestart",
@@ -1185,10 +1192,11 @@ export class GameServer {
     // every client receives in the start message.
     this.zbinCtx = createGameWireContext(this.gameStartInfo.players);
 
-    this.endTurnIntervalID = setInterval(
-      () => this.endTurn(),
-      this.deps.turnIntervalMs(),
+    // A drift-free schedule, not setInterval: see TurnClock.
+    this.turnClock = new TurnClock(this.deps.turnIntervalMs(), () =>
+      this.endTurn(),
     );
+    this.turnClock.start();
     this.clients.active().forEach((c) => {
       this.log.info("sending start message", {
         clientID: c.clientID,
@@ -1527,9 +1535,9 @@ export class GameServer {
   async end() {
     this.ended = true;
     // Close all WebSocket connections
-    if (this.endTurnIntervalID) {
-      clearInterval(this.endTurnIntervalID);
-      this.endTurnIntervalID = undefined;
+    if (this.turnClock) {
+      this.turnClock.stop();
+      this.turnClock = undefined;
     }
     this.clients.closeAll(CloseReason.GameEnded);
     // The lobby broadcast would stop itself on its next tick; do not leave a

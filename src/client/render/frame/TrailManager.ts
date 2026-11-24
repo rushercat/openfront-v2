@@ -20,7 +20,7 @@
  */
 
 import type { UnitState } from "../types";
-import { SMOOTHED_NUKE_TYPES } from "../types";
+import { SMOOTHED_NUKE_TYPES, UT_TRANSPORT } from "../types";
 
 // Bit 12 of the trail texel flags a nuke trail (vs a boat trail); bits 0-11 are
 // the owner smallID. Must match the mask/shift in trail.frag.glsl (owner & 0xFFF,
@@ -104,10 +104,11 @@ export class TrailManager {
         trail = { value, tiles: new Set(), lastPosStamped: -1 };
         this.unitTrails.set(id, trail);
       }
-      // Smoothed nukes render lastPos→pos interpolated per frame (UnitPass);
-      // stamp their trail only up to lastPos so the tail never leads the
-      // rendered missile.
-      const head = isNuke ? unit.lastPos : unit.pos;
+      // Nukes and boats render lastPos→pos interpolated per frame (UnitPass,
+      // UnitGlide); stamp their trail only up to lastPos so the tail never
+      // leads the rendered missile or boat.
+      const head =
+        isNuke || unit.unitType === UT_TRANSPORT ? unit.lastPos : unit.pos;
       if (trail.lastPosStamped === -1) {
         // First sighting — just stamp the current head
         this.claim(head, trail);

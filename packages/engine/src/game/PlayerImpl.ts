@@ -8,6 +8,7 @@ import {
   EmojiMessage,
   GameMode,
   GameType,
+  GameFeature,
   Gold,
   MAX_UPGRADE_AMOUNT,
   PlayerBuildable,
@@ -17,6 +18,7 @@ import {
   PlayerProfile,
   PlayerType,
   Relation,
+  Mines,
   Structures,
   Team,
   TerraNullius,
@@ -31,6 +33,7 @@ import {
   GameUpdateType,
   PlayerUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
+import { PoliticsFactor } from "@openfront/engine-api/game/Politics";
 import { ReadonlyTileSet } from "@openfront/engine-api/game/ReadViews";
 import { ClientID } from "@openfront/engine-api/Schemas";
 import { andFN, manhattanDistFN } from "@openfront/engine-lib/game/GameMapImpl";
@@ -55,6 +58,7 @@ import {
   within,
 } from "@openfront/engine-lib/Util";
 import { z } from "zod";
+import { AirfieldCoverage } from "../execution/AirMovement";
 import {
   newPlayerInfo,
   playerInfoData,
@@ -152,6 +156,14 @@ export class PlayerImpl implements Player {
 
   markedTraitorTick = -1;
   markedDoomsdayClockTick = -1;
+  /**
+   * openfront v2: tiles recently taken from other players, decaying over
+   * time (UnrestExecution). Their share of the player's land costs troops
+   * and gold, and at the extreme makes land break away.
+   */
+  private _unrest = 0;
+  /** Tick until which a player who lost their capital can't have one (-1 = never lost). */
+  private _capitalLostUntil = -1;
   /** Tick territory rot last took land from this player (-1 = never). */
   private rottedAtTick = -1;
   private _betrayalCount: number = 0;
@@ -418,6 +430,7 @@ export class PlayerImpl implements Player {
       lastDeleteUnitTick: this.lastDeleteUnitTick,
       isLobbyCreator: this.isLobbyCreator(),
       playable: this._playable,
+      unrestPercent: Math.round(this.unrestShare() * 100),
     };
   }
 
@@ -755,6 +768,45 @@ export class PlayerImpl implements Player {
     return this._spawnTile !== undefined;
   }
 
+  unrest(): number {
+    return this._unrest;
+  }
+
+  setUnrest(unrest: number): void {
+    this._unrest = unrest < 0 ? 0 : unrest;
+  }
+
+  /** Unrest as a share of the player's land, 0 to 1. */
+  politicsFactor(kind: PoliticsFactor): number {
+    return (
+      (this.mg.politics()?.factor(this, kind) ?? 1) *
+      (this.mg.draft()?.factor(this, kind) ?? 1)
+    );
+  }
+
+  unrestShare(): number {
+    const tiles = this._tiles.size;
+    if (tiles === 0) return 0;
+    const share = this._unrest / tiles;
+    return share > 1 ? 1 : share;
+  }
+
+  capitalLostUntil(): number {
+    return this._capitalLostUntil;
+  }
+
+  setCapitalLostUntil(tick: number): void {
+    this._capitalLostUntil = tick;
+  }
+
+  /** The player's finished capital, if it has one. */
+  capital(): Unit | null {
+    for (const unit of this.units(UnitType.Capital)) {
+      if (unit.isActive() && !unit.isUnderConstruction()) return unit;
+    }
+    return null;
+  }
+
   setSpawnTile(spawnTile: TileRef): void {
     this._spawnTile = spawnTile;
   }
@@ -840,6 +892,10 @@ export class PlayerImpl implements Player {
       return false;
     }
     if (this.isFriendly(other) || !this.isAlive()) {
+      return false;
+    }
+    // Alliance limit (world congress).
+    if (this.mg.politics()?.allianceBlocked(this, other)) {
       return false;
     }
 
@@ -1248,6 +1304,7 @@ export class PlayerImpl implements Player {
   canTrade(other: Player): boolean {
     const embargo =
       other.hasEmbargoAgainst(this) || this.hasEmbargoAgainst(other);
+    if (this.mg.politics()?.tradeBlocked(this, other)) return false;
     return !embargo && other.id() !== this.id();
   }
 
@@ -1477,6 +1534,14 @@ export class PlayerImpl implements Player {
     if (this.mg.config().isUnitDisabled(unitType)) {
       return false;
     }
+    // A decree of the world congress (nuclear peace, disarmament, …).
+    if (this.mg.politics()?.forbidsUnit(this, unitType)) {
+      return false;
+    }
+    // Draft mode: only what the player's deck unlocks.
+    if (this.mg.draft()?.allowsUnit(this, unitType) === false) {
+      return false;
+    }
     const cost = knownCost ?? this.mg.unitInfo(unitType).cost(this.mg, this);
     if (this._gold < cost) {
       return false;
@@ -1606,8 +1671,36 @@ export class PlayerImpl implements Player {
     if (!this.canBuildUnitType(unitType)) {
       return false;
     }
+    if (!this.politicsAllowsStrike(unitType, targetTile)) {
+      return false;
+    }
 
     return this.canSpawnUnitType(unitType, targetTile, validTiles);
+  }
+
+  /**
+   * Decrees of the world congress that stop strikes on a player's land: a
+   * ceasefire, a safe zone, neutrality, and the Geneva convention around
+   * cities and ports.
+   */
+  private politicsAllowsStrike(unitType: UnitType, tile: TileRef): boolean {
+    const politics = this.mg.politics();
+    if (politics === null) return true;
+    switch (unitType) {
+      case UnitType.AtomBomb:
+      case UnitType.HydrogenBomb:
+      case UnitType.MIRV:
+      case UnitType.CruiseMissile:
+      case UnitType.TransportPlane:
+        break;
+      default:
+        return true;
+    }
+    const owner = this.mg.owner(tile);
+    if (!owner.isPlayer() || owner === this) return true;
+    if (politics.forbidsAttack(this, owner)) return false;
+    const range = unitType === UnitType.TransportPlane ? 6 : 15;
+    return !politics.protectsTile(this, tile, range);
   }
 
   private canSpawnUnitType(
@@ -1629,7 +1722,26 @@ export class PlayerImpl implements Player {
       case UnitType.Port:
         return this.portSpawn(targetTile, validTiles);
       case UnitType.Warship:
+      case UnitType.AircraftCarrier:
         return this.warshipSpawn(targetTile);
+      case UnitType.CruiseMissile:
+        return this.cruiseMissileSpawn(targetTile);
+      case UnitType.TransportPlane:
+        return this.paradropSpawn(targetTile);
+      case UnitType.Capital:
+        return this.capitalSpawn(targetTile, validTiles);
+      case UnitType.FighterJet:
+      case UnitType.Bomber:
+        return this.aircraftSpawn(targetTile);
+      case UnitType.NuclearSubmarine:
+        return this.warshipSpawn(targetTile);
+      case UnitType.Tank:
+        return this.tankSpawn(targetTile);
+      case UnitType.LandMine:
+      case UnitType.SeaMine:
+        return this.mineSpawn(unitType, targetTile);
+      case UnitType.RailDepot:
+        return this.railDepotSpawn(targetTile, validTiles);
       case UnitType.Shell:
       case UnitType.SAMMissile:
         return targetTile;
@@ -1644,6 +1756,9 @@ export class PlayerImpl implements Player {
       case UnitType.SAMLauncher:
       case UnitType.City:
       case UnitType.Factory:
+      case UnitType.AADefense:
+      case UnitType.Airfield:
+      case UnitType.RepairStation:
         return this.landBasedStructureSpawn(targetTile, validTiles);
       default:
         assertNever(unitType);
@@ -1695,11 +1810,96 @@ export class PlayerImpl implements Player {
       (silo) =>
         silo.isActive() && !silo.isInCooldown() && !silo.isUnderConstruction(),
     );
-    readySilos.sort(
+    // A surfaced submarine with room left in its payload launches too.
+    const payloadCost = config.nukePayloadCost(nukeType);
+    const readySubmarines = this.units(UnitType.NuclearSubmarine).filter(
+      (sub) =>
+        sub.isActive() &&
+        sub.submarineState()?.mode === "surfaced" &&
+        (sub.submarineState()?.payloadLeft ?? 0) >= payloadCost,
+    );
+    const launchers = [...readySilos, ...readySubmarines];
+    launchers.sort(
       (a, b) =>
         mg.manhattanDist(a.tile(), tile) - mg.manhattanDist(b.tile(), tile),
     );
-    return readySilos[0]?.tile() ?? false;
+    return launchers[0]?.tile() ?? false;
+  }
+
+  /**
+   * The factory a new tank sent to `tile` rolls out of, like a warship out
+   * of a port: the nearest finished one. False without one, or once the
+   * player owns as many tanks as its factories hold (tanksPerFactoryLevel
+   * per level).
+   */
+  tankSpawn(tile: TileRef): TileRef | false {
+    if (!this.mg.isLand(tile)) {
+      return false;
+    }
+    const factories = this.units(UnitType.Factory).filter(
+      (factory) => factory.isActive() && !factory.isUnderConstruction(),
+    );
+    let levels = 0;
+    for (const factory of factories) {
+      levels += factory.level();
+    }
+    const capacity = levels * this.mg.config().tanksPerFactoryLevel();
+    if (this.units(UnitType.Tank).length >= capacity) {
+      return false;
+    }
+    const closest = findClosestBy(factories, (factory) =>
+      this.mg.manhattanDist(factory.tile(), tile),
+    );
+    return closest?.tile() ?? false;
+  }
+
+  /**
+   * A land mine goes on the player's own land, a sea mine on any water; no
+   * mine may lie within mineMinDistance of another (of anyone's).
+   */
+  mineSpawn(type: UnitType, tile: TileRef): TileRef | false {
+    const mg = this.mg;
+    if (type === UnitType.LandMine) {
+      if (
+        mg.owner(tile) !== this ||
+        !mg.isLand(tile) ||
+        mg.isImpassable(tile)
+      ) {
+        return false;
+      }
+    } else if (!mg.isWater(tile)) {
+      return false;
+    }
+    if (
+      mg.anyUnitNearby(
+        tile,
+        mg.config().mineMinDistance(),
+        Mines.types,
+        (unit) => unit.isActive(),
+      )
+    ) {
+      return false;
+    }
+    return tile;
+  }
+
+  /**
+   * A rail depot must join a railway: like a city, it gets a station only
+   * within reach of a factory (its owner's or a friend's).
+   */
+  railDepotSpawn(tile: TileRef, validTiles: TileRef[] | null): TileRef | false {
+    const spawn = this.landBasedStructureSpawn(tile, validTiles);
+    if (spawn === false) {
+      return false;
+    }
+    const connected = this.mg.anyUnitNearby(
+      spawn,
+      this.mg.config().trainStationMaxRange(),
+      [UnitType.Factory],
+      (factory) =>
+        factory.owner() === this || this.isFriendly(factory.owner() as Player),
+    );
+    return connected ? spawn : false;
   }
 
   portSpawn(tile: TileRef, validTiles: TileRef[] | null): TileRef | false {
@@ -1729,6 +1929,100 @@ export class PlayerImpl implements Player {
     );
 
     return bestPort?.tile() ?? false;
+  }
+
+  /**
+   * The airfield a new aircraft sent to `tile` takes off from: the nearest
+   * finished one. False without one, or once the player owns as many
+   * aircraft as its airfields hold (aircraftPerAirfieldLevel per level).
+   */
+  aircraftSpawn(tile: TileRef): TileRef | false {
+    const bases = this.airBases();
+    let capacity = 0;
+    for (const base of bases) {
+      capacity +=
+        base.type() === UnitType.AircraftCarrier
+          ? this.mg.config().carrierAircraftCapacity()
+          : base.level() * this.mg.config().aircraftPerAirfieldLevel();
+    }
+    if (this.units(UnitType.FighterJet, UnitType.Bomber).length >= capacity) {
+      return false;
+    }
+    const closest = findClosestBy(bases, (base) =>
+      this.mg.manhattanDist(base.tile(), tile),
+    );
+    return closest?.tile() ?? false;
+  }
+
+  /** Where the player's planes take off: finished airfields and aircraft carriers. */
+  airBases(): Unit[] {
+    return this.units(UnitType.Airfield, UnitType.AircraftCarrier).filter(
+      (base) => base.isActive() && !base.isUnderConstruction(),
+    );
+  }
+
+  /**
+   * The silo a cruise missile at `tile` launches from: the nearest one with
+   * a missile ready, within cruiseMissileRange. Not at the player's own or
+   * friends' land.
+   */
+  cruiseMissileSpawn(tile: TileRef): TileRef | false {
+    const owner = this.mg.owner(tile);
+    if (owner === this || (owner.isPlayer() && this.isFriendly(owner))) {
+      return false;
+    }
+    const range = this.mg.config().cruiseMissileRange();
+    const silo = findClosestBy(
+      this.units(UnitType.MissileSilo),
+      (s) => this.mg.manhattanDist(s.tile(), tile),
+      (s) =>
+        s.isActive() &&
+        !s.isUnderConstruction() &&
+        !s.isInCooldown() &&
+        this.mg.euclideanDistSquared(s.tile(), tile) <= range * range,
+    );
+    return silo?.tile() ?? false;
+  }
+
+  /**
+   * The airfield or carrier paratroopers for `tile` take off from: the
+   * nearest, as long as the tile is within the player's air range. They
+   * land on land that isn't the player's or a friend's.
+   */
+  paradropSpawn(tile: TileRef): TileRef | false {
+    if (!this.mg.isLand(tile) || this.mg.isImpassable(tile)) {
+      return false;
+    }
+    const owner = this.mg.owner(tile);
+    if (owner === this || (owner.isPlayer() && this.isFriendly(owner))) {
+      return false;
+    }
+    if (!new AirfieldCoverage(this.mg, this).contains(tile)) {
+      return false;
+    }
+    const closest = findClosestBy(this.airBases(), (base) =>
+      this.mg.manhattanDist(base.tile(), tile),
+    );
+    return closest?.tile() ?? false;
+  }
+
+  /**
+   * A capital goes on the player's own land. Building one moves the capital
+   * (CapitalExecution). Not while the player is still without one after
+   * losing it, nor with capitals switched off.
+   */
+  capitalSpawn(tile: TileRef, validTiles: TileRef[] | null): TileRef | false {
+    if (this.mg.config().isFeatureDisabled(GameFeature.Capital)) {
+      return false;
+    }
+    if (this._capitalLostUntil > this.mg.ticks()) {
+      return false;
+    }
+    // One move at a time.
+    if (this.units(UnitType.Capital).some((c) => c.isUnderConstruction())) {
+      return false;
+    }
+    return this.landBasedStructureSpawn(tile, validTiles);
   }
 
   landBasedUnitSpawn(tile: TileRef): TileRef | false {
@@ -1932,6 +2226,10 @@ export class PlayerImpl implements Player {
     player: Player,
     treatAFKFriendly: boolean = false,
   ): boolean {
+    // Ceasefire, safe zone, neutrality (world congress).
+    if (this.mg.politics()?.forbidsAttack(this, player)) {
+      return false;
+    }
     if (this.type() !== PlayerType.Human) {
       // Only human attackers respect PVP immunity
       return !this.isFriendly(player, treatAFKFriendly);
@@ -1998,6 +2296,8 @@ export class PlayerImpl implements Player {
       markedDoomsdayClockTick: this.markedDoomsdayClockTick,
       rottedAtTick: this.rottedAtTick,
       betrayalCount: this._betrayalCount,
+      unrest: this._unrest,
+      capitalLostUntil: this._capitalLostUntil,
       embargoes: [...this.embargoes.values()].map((e) => ({
         target: w.player(e.target),
         createdAt: e.createdAt,
@@ -2071,6 +2371,8 @@ export class PlayerImpl implements Player {
     this.markedDoomsdayClockTick = s.markedDoomsdayClockTick;
     this.rottedAtTick = s.rottedAtTick;
     this._betrayalCount = s.betrayalCount;
+    this._unrest = s.unrest;
+    this._capitalLostUntil = s.capitalLostUntil;
     this.embargoes = new Map();
     for (const e of s.embargoes) {
       this.embargoes.set(r.playerID(e.target), {
@@ -2129,10 +2431,12 @@ export class PlayerImpl implements Player {
 
 export const PlayerSnapshot = snapshotType({
   name: "Player",
-  version: 2,
+  version: 3,
   migrations: {
     // v1 had no scenario nations, so none was playable.
     1: (d) => ({ ...d, playable: false }),
+    // v2 had no unrest and no capitals.
+    2: (d) => ({ ...d, unrest: 0, capitalLostUntil: -1 }),
   },
   schema: z.object({
     smallID: zInt(),
@@ -2151,6 +2455,8 @@ export const PlayerSnapshot = snapshotType({
     markedDoomsdayClockTick: zInt(),
     rottedAtTick: zInt(),
     betrayalCount: zInt(),
+    unrest: zNum(),
+    capitalLostUntil: zInt(),
     embargoes: z.array(
       z.object({
         target: zPlayerRef(),

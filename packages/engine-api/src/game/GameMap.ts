@@ -26,6 +26,8 @@ export interface GameMap {
   setWater(ref: TileRef): void;
   /** Bumped every time a land tile turns to water; lets callers cache anything derived from water components. */
   waterVersion(): number;
+  /** Bumped on every terrain edit, of any bit (land, shoreline, ocean, magnitude); lets callers cache anything derived from the terrain. */
+  terrainVersion(): number;
   setShorelineBit(ref: TileRef): void;
   clearShorelineBit(ref: TileRef): void;
   setOcean(ref: TileRef): void;

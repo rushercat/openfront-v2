@@ -1,6 +1,7 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
 import { MessageType, UnitType } from "@openfront/engine-api/game/GameTypes";
 import { renderNumber } from "@openfront/engine-lib/Format";
+import { structureHealthFraction } from "@openfront/engine-lib/game/UnitHealth";
 import {
   zInt,
   zPlayerRef,
@@ -210,10 +211,13 @@ export class TradeShipExecution implements Execution {
         .stats()
         .boatCapturedTrade(this.tradeShip!.owner(), this.origOwner, gold);
     } else {
-      this.srcPort.owner().addGold(gold, this.srcPort.tile());
-      this._dstPort.owner().addGold(gold, this._dstPort.tile());
-      this.srcPort.owner().addTradeGold(gold);
-      this._dstPort.owner().addTradeGold(gold);
+      // A damaged port pays its owner out in proportion to its health.
+      const srcGold = scaleGold(gold, structureHealthFraction(this.srcPort));
+      const dstGold = scaleGold(gold, structureHealthFraction(this._dstPort));
+      this.srcPort.owner().addGold(srcGold, this.srcPort.tile());
+      this._dstPort.owner().addGold(dstGold, this._dstPort.tile());
+      this.srcPort.owner().addTradeGold(srcGold);
+      this._dstPort.owner().addTradeGold(dstGold);
       // Record stats
       this.mg
         .stats()
@@ -292,3 +296,9 @@ export const TradeShipExecutionSnapshot = execSnapshotType({
   schema: TradeShipExecutionStateSchema,
   cls: () => TradeShipExecution,
 });
+
+/** `gold` times a 0-1 fraction, floored. */
+function scaleGold(gold: bigint, fraction: number): bigint {
+  if (fraction >= 1) return gold;
+  return BigInt(Math.floor(Number(gold) * fraction));
+}

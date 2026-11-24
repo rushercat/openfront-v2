@@ -1,5 +1,6 @@
 import { GameEnv } from "@openfront/shared/configuration/Env";
 import cluster, { Worker } from "cluster";
+import compression from "compression";
 import crypto from "crypto";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -14,6 +15,7 @@ import {
   registeredSite,
   sendCheckin,
 } from "./ClusterCheckin";
+import { registerCustomMapRoutes } from "./CustomMaps";
 import { getDescriptor } from "./DesktopRelease";
 import {
   coordinatorUrl,
@@ -21,6 +23,7 @@ import {
 } from "./LobbyCoordinatorClient";
 import { logger } from "./Logger";
 import { MapPlaylist } from "./MapPlaylist";
+import { registerMapSessionRoutes } from "./MapSessions";
 import { fetchMapWeights, MAP_WEIGHTS_POLL_MS } from "./MapWeights";
 import { MasterLobbyService } from "./MasterLobbyService";
 import { setNoStoreHeaders } from "./NoStoreHeaders";
@@ -41,6 +44,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 app.use(express.json());
+
+// Compressed responses: hosted without nginx in front (hosting/router.mjs),
+// assets would otherwise travel raw — 3-4x the size for scripts and styles,
+// 7x for a map's terrain (.bin), which the default filter doesn't know as
+// compressible. Behind nginx it costs nothing: nginx passes them through.
+app.use(
+  compression({
+    filter: (req, res) =>
+      /\.bin$/.test(req.path) || compression.filter(req, res),
+  }),
+);
 
 // Serve the shared app shell for the root document.
 app.use(async (req, res, next) => {
@@ -115,6 +129,9 @@ app.use(
   rateLimit({
     windowMs: 1000, // 1 second
     max: 20, // 20 requests per IP per second
+    // A shared map session sends a few edits a second per builder, and
+    // builders at one place share an IP. MapSessions.ts caps its own use.
+    skip: (req) => req.path.startsWith("/api/map-sessions/"),
   }),
 );
 
@@ -147,9 +164,26 @@ app.get(
   },
 );
 
-app.use("/api", (_req, res, next) => {
-  setNoStoreHeaders(res);
+app.use("/api", (req, res, next) => {
+  // Custom map files set their own (immutable, versioned) caching.
+  if (!req.path.startsWith("/custom-maps/") || !req.path.includes("/file/")) {
+    setNoStoreHeaders(res);
+  }
   next();
+});
+
+// Custom maps made in the map editor (CustomMaps.ts).
+registerCustomMapRoutes(app);
+// Building a map together in the map editor (MapSessions.ts).
+registerMapSessionRoutes(app);
+
+// openfront v2 self-hosting: with DOMAIN=localhost the production client
+// sends its account/shop API calls here (ApiBase.ts). There is no account
+// API, so everything is "not found" — which the server list reads as a
+// reachable backend with no list, and falls back to this server.
+app.use("/_localapi", (_req, res) => {
+  setNoStoreHeaders(res);
+  res.status(404).json({ error: "not_found" });
 });
 
 // Start the master process

@@ -1,3 +1,4 @@
+import { DraftCardId } from "@openfront/engine-api/game/Draft";
 import { TileRef } from "@openfront/engine-api/game/GameMap";
 import {
   AllPlayers,
@@ -7,6 +8,7 @@ import {
   Tick,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
+import { DecreeType, VoteChoice } from "@openfront/engine-api/game/Politics";
 import {
   AllPlayersStats,
   ClientID,
@@ -143,7 +145,24 @@ export class BuildUnitIntentEvent implements GameEvent {
     public readonly tile: TileRef,
     public readonly rocketDirectionUp?: boolean,
     public readonly amount?: number,
+    /** Paratroopers aboard a transport plane (unset: the default share). */
+    public readonly troops?: number,
   ) {}
+}
+
+/**
+ * The troops a transport plane takes along: the player's attack ratio of
+ * their troops, like an attack. Undefined for every other unit.
+ */
+export function paradropTroops(
+  unit: UnitType,
+  troops: () => number | undefined,
+  attackRatio: number | undefined,
+): number | undefined {
+  if (unit !== UnitType.TransportPlane) return undefined;
+  const available = troops();
+  if (available === undefined) return undefined;
+  return Math.max(1, Math.floor(available * (attackRatio ?? 0.2)));
 }
 
 export class SendTargetPlayerIntentEvent implements GameEvent {
@@ -233,6 +252,36 @@ export class SendHashEvent implements GameEvent {
 // the new game id to move the group to.
 export class NewLobbyEvent implements GameEvent {
   constructor(public readonly gameID: string) {}
+}
+
+export class SurfaceSubmarineIntentEvent implements GameEvent {
+  constructor(public readonly unitId: number) {}
+}
+
+/** World congress: put a decree forward (Politics). */
+export class ProposeDecreeIntentEvent implements GameEvent {
+  constructor(
+    public readonly decree: DecreeType,
+    public readonly target: string | null,
+  ) {}
+}
+
+/** Draft: keep one of the two cards on offer. */
+export class DraftPickIntentEvent implements GameEvent {
+  constructor(public readonly card: DraftCardId) {}
+}
+
+/** Draft: research the next level of a card. */
+export class DraftResearchIntentEvent implements GameEvent {
+  constructor(public readonly card: DraftCardId) {}
+}
+
+/** World congress: vote on a proposal (Politics). */
+export class CastVoteIntentEvent implements GameEvent {
+  constructor(
+    public readonly proposalId: number,
+    public readonly vote: VoteChoice,
+  ) {}
 }
 
 export class MoveWarshipIntentEvent implements GameEvent {
@@ -367,6 +416,34 @@ export class Transport {
 
     this.subscribe(MoveWarshipIntentEvent, (e) => {
       this.onMoveWarshipEvent(e);
+    });
+
+    this.subscribe(SurfaceSubmarineIntentEvent, (e) => {
+      this.sendIntent({ type: "surface_submarine", unitId: e.unitId });
+    });
+
+    this.subscribe(ProposeDecreeIntentEvent, (e) => {
+      this.sendIntent({
+        type: "propose_decree",
+        decree: e.decree,
+        ...(e.target !== null ? { target: e.target } : {}),
+      });
+    });
+
+    this.subscribe(DraftPickIntentEvent, (e) => {
+      this.sendIntent({ type: "draft_pick", card: e.card });
+    });
+
+    this.subscribe(DraftResearchIntentEvent, (e) => {
+      this.sendIntent({ type: "draft_research", card: e.card });
+    });
+
+    this.subscribe(CastVoteIntentEvent, (e) => {
+      this.sendIntent({
+        type: "cast_vote",
+        proposalId: e.proposalId,
+        vote: e.vote,
+      });
     });
 
     this.subscribe(SendDeleteUnitIntentEvent, (e) =>
@@ -1010,6 +1087,7 @@ export class Transport {
       tile: event.tile,
       rocketDirectionUp: event.rocketDirectionUp,
       amount: event.amount,
+      troops: event.troops,
     });
   }
 

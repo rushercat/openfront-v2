@@ -16,6 +16,11 @@ import {
   TUTORIAL_VIDEO_URL,
 } from "../../../client/Utils";
 import { fetchUserMeUncached, getUserMe, invalidateUserMe } from "../../Api";
+import {
+  activeChronicle,
+  currentMatchSession,
+} from "../../chronicle/MatchSession";
+import { openMatchStats } from "../../chronicle/MatchStatsModal";
 import "../../components/CosmeticCard";
 import { cosmeticSelectionLabel } from "../../components/CosmeticPresentation";
 import {
@@ -234,6 +239,7 @@ export class WinModal extends LitElement implements Controller {
           }
           ${this.innerHtml()}
         </div>
+        ${this.renderMatchButtons()}
         <!-- Leaving is the quieter action, on the left; staying in the game
              is the main one, on the right. Sharing a milestone sits between
              them, or on its own row above where three don't fit. -->
@@ -359,6 +365,58 @@ export class WinModal extends LitElement implements Controller {
     >
       <span class="relative">${label}</span>
     </button>`;
+  }
+
+  // openfront v2: the match's statistics (graphs and key moments) and its
+  // replay, which this browser recorded (chronicle/MatchSession).
+  private renderMatchButtons(): TemplateResult | typeof nothing {
+    const chronicle = activeChronicle();
+    const session = currentMatchSession();
+    const canReplay =
+      session !== null &&
+      session.replayable &&
+      !(this.game?.config().isReplay() ?? true);
+    if (chronicle === null && !canReplay) return nothing;
+    return html`<div class="mt-3 flex flex-wrap gap-2.5 shrink-0">
+      ${
+        chronicle === null
+          ? nothing
+          : this.actionButton(
+              "quiet",
+              translateText("win_modal.statistics"),
+              () => openMatchStats(chronicle, this._title || undefined),
+              "statistics",
+            )
+      }
+      ${
+        canReplay
+          ? this.actionButton(
+              "quiet",
+              translateText("win_modal.watch_replay"),
+              () => void this.watchReplay(),
+              "replay",
+            )
+          : nothing
+      }
+    </div>`;
+  }
+
+  /** Saves the recording, then reloads into the replay viewer (leaving the game). */
+  private async watchReplay(): Promise<void> {
+    const session = currentMatchSession();
+    if (session === null) return;
+    const saved = await session.save();
+    if (!saved) {
+      console.warn("win modal: the game couldn't be saved for its replay");
+    }
+    // replaceState, not location.hash: a hashchange would reach the game's
+    // own hash handling, which drops it while a game is on.
+    history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}#replay-viewer=${session.gameID}`,
+    );
+    window.location.reload();
   }
 
   // Sharing a milestone or becoming a Legend, once the reveal has shown it.

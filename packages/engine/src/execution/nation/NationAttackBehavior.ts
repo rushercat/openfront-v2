@@ -44,11 +44,56 @@ import {
   EMOJI_ASSIST_TARGET_ME,
   NationEmojiBehavior,
 } from "./NationEmojiBehavior";
-import { findJuiciestTarget, findRunawayLeader } from "./NationUtils";
+import {
+  findJuiciestTarget,
+  findRunawayLeader,
+  aiUnitDisabled,
+} from "./NationUtils";
 import type { NationWarshipBehavior } from "./NationWarshipBehavior";
 
 // Reusable neighbor buffer for hot loops; the simulation is single-threaded.
 const NEIGHBOR_SCRATCH: TileRef[] = [0, 0, 0, 0];
+
+/** Share of its army an enemy must have in attacks on others to count as distracted. */
+const DISTRACTED_SHARE = 0.4;
+
+// A landed beachhead follows up with a normal attack, not with everything:
+// LANDING_SHARE_MIN..LANDING_SHARE_NORMAL of the troops at home, growing with
+// the defender's strength. To take a whole enemy out it may go up to
+// LANDING_SHARE_MAX (troops must beat the defender's by LANDING_OVERWHELM).
+// While others attack us, it keeps the rest home (LANDING_SHARE_BUSY).
+const LANDING_SHARE_MIN = 0.2;
+const LANDING_SHARE_NORMAL = 0.4;
+const LANDING_SHARE_MAX = 0.8;
+const LANDING_SHARE_BUSY = 0.3;
+const LANDING_OVERWHELM = 1.25;
+
+/**
+ * Share of its home troops a nation sends after a landed boat.
+ * `enemyTroops` is null for free land. `underOtherAttack`: someone other
+ * than the target is attacking us right now.
+ */
+export function landingAttackShare(
+  homeTroops: number,
+  enemyTroops: number | null,
+  underOtherAttack: boolean,
+): number {
+  if (homeTroops <= 0) return 0;
+  let share = LANDING_SHARE_MIN;
+  if (enemyTroops !== null) {
+    const ratio = enemyTroops / homeTroops;
+    // 20 % against a weak enemy, 40 % against an equal or stronger one
+    share = Math.min(
+      LANDING_SHARE_NORMAL,
+      LANDING_SHARE_MIN + (LANDING_SHARE_NORMAL - LANDING_SHARE_MIN) * ratio,
+    );
+    // Enough to overrun the whole enemy, if that stays below the maximum
+    const overrun = ratio * LANDING_OVERWHELM;
+    if (overrun > share && overrun <= LANDING_SHARE_MAX) share = overrun;
+  }
+  if (underOtherAttack) share = Math.min(share, LANDING_SHARE_BUSY);
+  return Math.max(LANDING_SHARE_MIN, Math.min(LANDING_SHARE_MAX, share));
+}
 
 type Box = { min: Cell; max: Cell } | null | undefined;
 
@@ -134,9 +179,19 @@ export class NationAttackBehavior extends AiAttackBehavior {
       this.followedLandings.push(attack);
       const target = attack.target();
       if (!this.holdsLandNextTo(target, landing)) continue;
+      // A normal-sized attack (20–80 %), never everything that's home
+      const share = landingAttackShare(
+        this.homeTroops(),
+        target.isPlayer() ? target.troops() : null,
+        this.player.incomingAttacks().some((a) => a.attacker() !== target),
+      );
       this.sendLandAttack(
         target,
-        undefined,
+        (reserveTroops) =>
+          Math.min(
+            this.homeTroops() - reserveTroops,
+            this.homeTroops() * share,
+          ),
         target.isPlayer() ? target : undefined,
       );
     }
@@ -222,7 +277,7 @@ export class NationAttackBehavior extends AiAttackBehavior {
   private attackWithRandomBoat(borderingEnemies: Player[] = []) {
     if (this.player === null) throw new Error("not initialized");
 
-    if (this.game.config().isUnitDisabled(UnitType.TransportShip)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.TransportShip)) {
       return;
     }
 
@@ -453,6 +508,13 @@ export class NationAttackBehavior extends AiAttackBehavior {
 
     const assist = (): boolean => this.assistAllies();
 
+    const team = (): boolean => this.focusTeamTarget();
+
+    const distracted = (): boolean => {
+      const target = pick((enemies) => this.findDistractedEnemy(enemies));
+      return target !== null ? this.sendAttack(target) : false;
+    };
+
     const traitor = (): boolean => {
       const traitor = pick((enemies) => this.findTraitor(enemies));
       if (traitor) {
@@ -567,10 +629,10 @@ export class NationAttackBehavior extends AiAttackBehavior {
       case Difficulty.Hard:
         // Strong veryWeak and juicy strats after the distracting hated strat, to make the nations weaker than impossible
         // prettier-ignore
-        return [bots, assist, betray, nuked, traitor, afk, hated, veryWeak, juicy, victim, crown, weakest, island, donate];
+        return [bots, team, assist, betray, nuked, traitor, afk, hated, veryWeak, distracted, juicy, victim, crown, weakest, island, donate];
       case Difficulty.Impossible:
         // prettier-ignore
-        return [bots, veryWeak, betray, assist, victim, crown, traitor, juicy, afk, nuked, hated, weakest, island, donate];
+        return [bots, team, veryWeak, distracted, betray, assist, victim, crown, traitor, juicy, afk, nuked, hated, weakest, island, donate];
       default:
         assertNever(difficulty);
     }
@@ -761,7 +823,7 @@ export class NationAttackBehavior extends AiAttackBehavior {
   private overseasBots(): Player[] {
     if (
       this.game.config().gameConfig().difficulty === Difficulty.Easy ||
-      this.game.config().isUnitDisabled(UnitType.TransportShip) ||
+      aiUnitDisabled(this.game, this.player, UnitType.TransportShip) ||
       this.player.unitCount(UnitType.TransportShip) >=
         this.game.config().boatMaxNumber()
     ) {
@@ -836,6 +898,40 @@ export class NationAttackBehavior extends AiAttackBehavior {
     }
   }
 
+  /**
+   * Team games, Hard & Impossible: fight as a team. The enemy pressing our
+   * team hardest (its attacks on teammates count double, our teammates'
+   * attacks on it once) is the one we join in on, if we can reach it, so the
+   * team piles onto one front instead of each picking its own.
+   */
+  private focusTeamTarget(): boolean {
+    if (this.player.team() === null) return false;
+    const pressure = new Map<Player, number>();
+    const add = (enemy: Player | TerraNullius, troops: number) => {
+      if (!enemy.isPlayer() || enemy === this.player) return;
+      if (this.player.isFriendly(enemy)) return;
+      pressure.set(enemy, (pressure.get(enemy) ?? 0) + troops);
+    };
+    for (const mate of this.game.players()) {
+      if (mate === this.player || !this.player.isOnSameTeam(mate)) continue;
+      for (const attack of mate.incomingAttacks()) {
+        add(attack.attacker(), attack.troops() * 2);
+      }
+      for (const attack of mate.outgoingAttacks()) {
+        add(attack.target(), attack.troops());
+      }
+    }
+    const targets = [...pressure.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].smallID() - b[0].smallID())
+      .map(([enemy]) => enemy);
+    for (const enemy of targets) {
+      if (enemy.type() === PlayerType.Bot) continue;
+      if (!this.canReach(enemy)) continue;
+      if (this.sendAttack(enemy)) return true;
+    }
+    return false;
+  }
+
   private assistAllies(): boolean {
     if (this.game.config().disableAlliances()) return false;
 
@@ -861,6 +957,31 @@ export class NationAttackBehavior extends AiAttackBehavior {
       }
     }
     return false;
+  }
+
+  /**
+   * An enemy whose army is busy elsewhere: at least DISTRACTED_SHARE of its
+   * troops are in attacks on others (not on us or our friends), and what it
+   * kept home is less than ours. Hitting it now costs it twice. enemies is
+   * sorted by troops (ascending), so the weakest such enemy comes first.
+   */
+  private findDistractedEnemy(enemies: Player[]): Player | null {
+    const ours = this.homeTroops();
+    for (const enemy of enemies) {
+      if (enemy.type() === PlayerType.Bot) continue;
+      let away = 0;
+      for (const attack of enemy.outgoingAttacks()) {
+        const target = attack.target();
+        if (target === this.player) continue;
+        if (target.isPlayer() && this.player.isFriendly(target)) continue;
+        away += attack.troops();
+      }
+      const home = enemy.troops();
+      if (away >= (home + away) * DISTRACTED_SHARE && home < ours) {
+        return enemy;
+      }
+    }
+    return null;
   }
 
   // Find a traitor who isn't significantly stronger than us
@@ -904,7 +1025,7 @@ export class NationAttackBehavior extends AiAttackBehavior {
   }
 
   private isBorderingNukedTerritory(): boolean {
-    if (this.game.config().isUnitDisabled(UnitType.MissileSilo)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.MissileSilo)) {
       return false;
     }
 
@@ -969,7 +1090,7 @@ export class NationAttackBehavior extends AiAttackBehavior {
   }
 
   private findNearestIslandEnemy(): Player | null {
-    if (this.game.config().isUnitDisabled(UnitType.TransportShip)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.TransportShip)) {
       return null;
     }
 
@@ -1333,7 +1454,7 @@ export class NationAttackBehavior extends AiAttackBehavior {
     const path =
       difficulty === Difficulty.Medium || direct <= 20
         ? null
-        : PathFinding.Water(this.game).findPath(launch, landing);
+        : PathFinding.WaterPlanning(this.game).findPath(launch, landing);
     const length = path?.length ?? direct;
     return {
       length,

@@ -134,8 +134,13 @@ export class WarshipExecution implements Execution {
       return;
     }
 
-    // Priority 2: Fight enemy warship if in range
-    if (this.warship.targetUnit()?.type() === UnitType.Warship) {
+    // Priority 2: Fight enemy warship (or surfaced submarine) if in range
+    const targetType = this.warship.targetUnit()?.type();
+    if (
+      targetType === UnitType.Warship ||
+      targetType === UnitType.NuclearSubmarine ||
+      targetType === UnitType.AircraftCarrier
+    ) {
       this.shootTarget();
       this.patrol();
       return;
@@ -247,12 +252,23 @@ export class WarshipExecution implements Execution {
   }
 
   private findRetreatAggroTarget(): Unit | undefined {
-    return this.findBestTarget([UnitType.TransportShip, UnitType.Warship]);
+    return this.findBestTarget([
+      UnitType.TransportShip,
+      UnitType.Warship,
+      UnitType.NuclearSubmarine,
+      UnitType.AircraftCarrier,
+    ]);
   }
 
   private findTargetUnit(): Unit | undefined {
     return this.findBestTarget(
-      [UnitType.TransportShip, UnitType.Warship, UnitType.TradeShip],
+      [
+        UnitType.TransportShip,
+        UnitType.Warship,
+        UnitType.NuclearSubmarine,
+        UnitType.AircraftCarrier,
+        UnitType.TradeShip,
+      ],
       true,
     );
   }
@@ -273,12 +289,6 @@ export class WarshipExecution implements Execution {
     const config = mg.config();
     const owner = this.warship.owner();
 
-    const ships = mg.nearbyUnits(
-      this.warship.tile(),
-      config.warshipTargettingRange(),
-      types,
-    );
-
     // Trade-ship-specific state, lazily computed.
     let hasReachablePort: boolean | undefined;
     let patrolTile: number | undefined;
@@ -289,66 +299,96 @@ export class WarshipExecution implements Execution {
     let bestTypePriority = 0;
     let bestDistSquared = 0;
 
-    for (const { unit, distSquared } of ships) {
-      if (
-        unit === this.warship ||
-        unit.owner() === owner ||
-        !owner.canAttackPlayer(unit.owner(), true) ||
-        this.alreadySentShell.has(unit) ||
-        (unit.type() === UnitType.Warship &&
-          unit.warshipState().state === "docked")
-      ) {
-        continue;
-      }
-
-      const type = unit.type();
-
-      if (includeTradeShips && type === UnitType.TradeShip) {
-        if (warshipComponent === undefined) {
-          warshipComponent = mg.getWaterComponent(this.warship.tile());
-          hasReachablePort =
-            warshipComponent !== null &&
-            owner
-              .units(UnitType.Port)
-              .some(
-                (port) =>
-                  port.isActive() &&
-                  !port.isMarkedForDeletion() &&
-                  !port.isUnderConstruction() &&
-                  mg.hasWaterComponent(port.tile(), warshipComponent!),
-              );
-          patrolTile = this.warship.warshipState().patrolTile;
-          patrolRangeSquared = config.warshipPatrolRange() ** 2;
-        }
+    // Visited in nearbyUnits() order, so ties go the same way as before.
+    mg.forEachNearbyUnit(
+      this.warship.tile(),
+      config.warshipTargettingRange(),
+      types,
+      (unit, distSquared) => {
         if (
-          !hasReachablePort ||
-          patrolTile === undefined ||
-          unit.isSafeFromPirates() ||
-          unit.targetUnit()?.owner() === owner ||
-          unit.targetUnit()?.owner().isFriendly(owner)
+          unit === this.warship ||
+          unit.owner() === owner ||
+          !owner.canAttackPlayer(unit.owner(), true) ||
+          this.alreadySentShell.has(unit) ||
+          // No one sees a submerged submarine.
+          unit.isSubmerged() ||
+          (unit.type() === UnitType.Warship &&
+            unit.warshipState().state === "docked")
         ) {
-          continue;
+          return;
         }
+
+        const type = unit.type();
+
+        // Naval ban (world congress): only landings on the owner's or an
+        // ally's land are fair game.
+        if (mg.politics()?.navalDefenseOnly()) {
+          if (type !== UnitType.TransportShip) return;
+          const dst = unit.targetTile();
+          if (dst === undefined) return;
+          const dstOwner = mg.owner(dst);
+          if (
+            !dstOwner.isPlayer() ||
+            (dstOwner !== owner && !dstOwner.isFriendly(owner))
+          ) {
+            return;
+          }
+        }
+
+        if (includeTradeShips && type === UnitType.TradeShip) {
+          if (warshipComponent === undefined) {
+            warshipComponent = mg.getWaterComponent(this.warship.tile());
+            hasReachablePort =
+              warshipComponent !== null &&
+              owner
+                .units(UnitType.Port)
+                .some(
+                  (port) =>
+                    port.isActive() &&
+                    !port.isMarkedForDeletion() &&
+                    !port.isUnderConstruction() &&
+                    mg.hasWaterComponent(port.tile(), warshipComponent!),
+                );
+            patrolTile = this.warship.warshipState().patrolTile;
+            patrolRangeSquared = config.warshipPatrolRange() ** 2;
+          }
+          if (
+            !hasReachablePort ||
+            patrolTile === undefined ||
+            unit.isSafeFromPirates() ||
+            unit.targetUnit()?.owner() === owner ||
+            unit.targetUnit()?.owner().isFriendly(owner)
+          ) {
+            return;
+          }
+          if (
+            mg.euclideanDistSquared(patrolTile, unit.tile()) >
+            patrolRangeSquared!
+          ) {
+            return;
+          }
+        }
+
+        const typePriority =
+          type === UnitType.TransportShip
+            ? 0
+            : type === UnitType.Warship ||
+                type === UnitType.NuclearSubmarine ||
+                type === UnitType.AircraftCarrier
+              ? 1
+              : 2;
+
         if (
-          mg.euclideanDistSquared(patrolTile, unit.tile()) > patrolRangeSquared!
+          bestUnit === undefined ||
+          typePriority < bestTypePriority ||
+          (typePriority === bestTypePriority && distSquared < bestDistSquared)
         ) {
-          continue;
+          bestUnit = unit;
+          bestTypePriority = typePriority;
+          bestDistSquared = distSquared;
         }
-      }
-
-      const typePriority =
-        type === UnitType.TransportShip ? 0 : type === UnitType.Warship ? 1 : 2;
-
-      if (
-        bestUnit === undefined ||
-        typePriority < bestTypePriority ||
-        (typePriority === bestTypePriority && distSquared < bestDistSquared)
-      ) {
-        bestUnit = unit;
-        bestTypePriority = typePriority;
-        bestDistSquared = distSquared;
-      }
-    }
+      },
+    );
 
     return bestUnit;
   }

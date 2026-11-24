@@ -1,4 +1,8 @@
-import { TrainType, UnitType } from "@openfront/engine-api/game/GameTypes";
+import {
+  SubmarineMode,
+  TrainType,
+  UnitType,
+} from "@openfront/engine-api/game/GameTypes";
 import {
   GameUpdateType,
   UnitUpdate,
@@ -46,7 +50,27 @@ export const PACKED_UNIT_TYPES: readonly UnitType[] = [
   UnitType.MIRVWarhead, // 14
   UnitType.Train, // 15
   UnitType.Factory, // 16
+  UnitType.AADefense, // 17
+  UnitType.Airfield, // 18
+  UnitType.FighterJet, // 19
+  UnitType.Bomber, // 20
+  UnitType.NuclearSubmarine, // 21
+  UnitType.RailDepot, // 22
+  UnitType.Tank, // 23
+  UnitType.LandMine, // 24
+  UnitType.SeaMine, // 25
+  UnitType.RepairStation, // 26
+  UnitType.AircraftCarrier, // 27
+  UnitType.CruiseMissile, // 28
+  UnitType.TransportPlane, // 29
+  UnitType.Capital, // 30 (the 5-bit unit type field ends at 31)
 ] as const;
+
+const SUBMARINE_MODES: readonly SubmarineMode[] = [
+  "submerged",
+  "surfacing",
+  "surfaced",
+];
 
 const UNIT_TYPE_TO_INT = new Map<UnitType, number>(
   PACKED_UNIT_TYPES.map((t, idx) => [t, idx + 1]),
@@ -378,6 +402,16 @@ export class PackedUnitUpdateDecoder {
       };
     }
 
+    // A submarine has no SAM upgrade, so its state rides in those slots.
+    let submarineState;
+    if (this.unitType === UnitType.NuclearSubmarine) {
+      submarineState = {
+        mode: SUBMARINE_MODES[this.samUpgradeDuration] ?? "submerged",
+        readyTick: this.samUpgradeStartTick ?? 0,
+        payloadLeft: this.samUpgradeStartRange,
+      };
+    }
+
     let samUpgrade;
     if (this.hasSamUpgrade) {
       samUpgrade = {
@@ -413,6 +447,7 @@ export class PackedUnitUpdateDecoder {
       trainType: this.trainType,
       loaded: this.loaded,
       samUpgrade,
+      submarineState,
       missileTimerQueue: [],
     };
   }
@@ -474,6 +509,16 @@ export function packUnitUpdates(units: UnitUpdate[]): {
         update.samUpgrade.startRange ?? NaN;
       packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_TARGET_LEVEL] =
         update.samUpgrade.targetLevel ?? NaN;
+    } else if (update.submarineState) {
+      packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_START_TICK] =
+        update.submarineState.readyTick;
+      packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_DURATION] = Math.max(
+        0,
+        SUBMARINE_MODES.indexOf(update.submarineState.mode),
+      );
+      packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_START_RANGE] =
+        update.submarineState.payloadLeft;
+      packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_TARGET_LEVEL] = 0;
     } else {
       packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_START_TICK] = 0;
       packedUnitUpdates[offset + OFFSET_SAM_UPGRADE_DURATION] = 0;

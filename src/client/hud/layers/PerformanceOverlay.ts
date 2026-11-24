@@ -2,6 +2,7 @@ import { EventBus } from "@openfront/shared/EventBus";
 import { LitElement, css, html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { Controller } from "../../Controller";
+import { hasFrameDriver, onFrameDrawn } from "../../FramePacer";
 import {
   TickMetricsEvent,
   TogglePerformanceOverlayEvent,
@@ -83,6 +84,7 @@ export class PerformanceOverlay extends LitElement implements Controller {
   private lastSecondTime: number = 0;
   private framesThisSecond: number = 0;
   private fpsRafId: number | null = null;
+  private unsubscribeFrames: (() => void) | null = null;
   private tickExecutionTimes: number[] = [];
   private tickExecutionTimesSum: number = 0;
   private tickDelayTimes: number[] = [];
@@ -592,22 +594,33 @@ export class PerformanceOverlay extends LitElement implements Controller {
     this.userSettings.setPerformanceOverlay(nextVisible);
   }
 
-  // FPS measurement runs on its own RAF — the WebGL renderer doesn't expose a
-  // per-frame hook for the overlay, and starting/stopping with visibility
-  // keeps the RAF cost off the hot path when the overlay is hidden.
+  // FPS counts the frames the game actually draws (FramePacer's hook): with
+  // a frame cap, a RAF of its own would count the display's refresh rate
+  // instead. Without a game frame loop it falls back to its own RAF.
+  // Starting/stopping with visibility keeps the cost off the hot path when
+  // the overlay is hidden.
   private startFpsLoop(): void {
-    if (this.fpsRafId !== null) return;
+    if (this.fpsRafId !== null || this.unsubscribeFrames !== null) return;
     const tick = () => {
+      // The game's frame loop starts after the HUD: switch over once it runs.
+      if (hasFrameDriver()) {
+        this.fpsRafId = null;
+        this.unsubscribeFrames = onFrameDrawn(() => this.updateFrameMetrics(0));
+        return;
+      }
       this.updateFrameMetrics(0);
       this.fpsRafId = requestAnimationFrame(tick);
     };
-    this.fpsRafId = requestAnimationFrame(tick);
+    tick();
   }
 
   private stopFpsLoop(): void {
-    if (this.fpsRafId === null) return;
-    cancelAnimationFrame(this.fpsRafId);
-    this.fpsRafId = null;
+    this.unsubscribeFrames?.();
+    this.unsubscribeFrames = null;
+    if (this.fpsRafId !== null) {
+      cancelAnimationFrame(this.fpsRafId);
+      this.fpsRafId = null;
+    }
     this.lastTime = 0;
     this.lastSecondTime = 0;
     this.framesThisSecond = 0;

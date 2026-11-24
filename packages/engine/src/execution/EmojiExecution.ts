@@ -77,6 +77,11 @@ export class EmojiExecution implements Execution {
     return false;
   }
 
+  /** Not held up by a congress vote (Politics). */
+  activeDuringFreeze(): boolean {
+    return true;
+  }
+
   snapshot(w: SnapshotWriter): ExecRecord {
     return EmojiExecutionSnapshot.write({
       active: this.active,

@@ -9,7 +9,7 @@ import { zInt, zPlayerRef } from "@openfront/engine-lib/snapshot/SnapshotType";
 import { getMode, simpleHash } from "@openfront/engine-lib/Util";
 import { z } from "zod";
 import { EngineConfig } from "../configuration/EngineConfig";
-import { Execution, Game, Player } from "../game/Game";
+import { Execution, Game, Player, Unit } from "../game/Game";
 import {
   bumpTraversalGeneration,
   tileTraversalScratch,
@@ -21,8 +21,12 @@ import type {
   SnapshotReader,
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
+import { isFixedScenarioAlliance } from "./HistoricalScenarioExecution";
 
 const TICKS_PER_CLUSTER_CALC = 20;
+
+/** Ticks between two repair steps of a damaged structure (1 second). */
+const STRUCTURE_REPAIR_INTERVAL = 10;
 
 const CLUSTER_SURROUNDED = 1;
 
@@ -55,6 +59,34 @@ export class PlayerExecution implements Execution {
       ticks + (simpleHash(this.player.id()) % this.ticksPerClusterCalc);
   }
 
+  /**
+   * Mends a damaged structure by the heal rate of the best finished Repair
+   * Station of its owner that reaches it, if any.
+   */
+  private repairStructure(u: Unit) {
+    let bestLevel = 0;
+    for (const { unit, distSquared } of this.mg.nearbyUnits(
+      u.tile(),
+      this.config.maxRepairStationRange(),
+      UnitType.RepairStation,
+    )) {
+      if (
+        unit.owner() !== this.player ||
+        unit.isUnderConstruction() ||
+        !unit.isActive()
+      ) {
+        continue;
+      }
+      const range = this.config.repairStationRange(unit.level());
+      if (distSquared <= range * range && unit.level() > bestLevel) {
+        bestLevel = unit.level();
+      }
+    }
+    if (bestLevel === 0) return;
+    const percent = this.config.repairStationHealPercent(bestLevel);
+    u.modifyHealth(Math.max(1, Math.floor((u.maxHealth() * percent) / 100)));
+  }
+
   tick(ticks: number) {
     this.player.decayRelations();
     for (const u of this.player.units()) {
@@ -68,11 +100,22 @@ export class PlayerExecution implements Execution {
         continue;
       }
       if (owner === this.player) {
+        // Damaged structures don't heal on their own: only a Repair Station
+        // in reach mends them (the best one, stations don't add up).
+        if (
+          ticks % STRUCTURE_REPAIR_INTERVAL === 0 &&
+          !u.isUnderConstruction() &&
+          u.hasHealth() &&
+          u.health() < u.maxHealth()
+        ) {
+          this.repairStructure(u);
+        }
         continue;
       }
 
       const captor = this.mg!.player(owner.id());
-      if (u.type() === UnitType.DefensePost) {
+      // A taken capital falls (CapitalExecution), it doesn't change hands.
+      if (u.type() === UnitType.DefensePost || u.type() === UnitType.Capital) {
         u.delete(true, captor);
       } else {
         captor.captureUnit(u);
@@ -98,13 +141,28 @@ export class PlayerExecution implements Execution {
 
     const troopInc = this.config.troopIncreaseRate(this.player);
     this.player.addTroops(troopInc);
-    const goldFromWorkers = this.config.goldAdditionRate(this.player);
+    const goldFromWorkers =
+      this.config.goldAdditionRate(this.player) +
+      this.config.factoryGoldRate(this.player);
     this.player.addGold(goldFromWorkers);
 
     // Record stats
     this.mg.stats().goldWork(this.player, goldFromWorkers);
 
     for (const alliance of this.player.alliances()) {
+      // A historical scenario's bloc alliances never run out: they renew
+      // a minute before they would.
+      if (
+        alliance.expiresAt() <= this.mg.ticks() + 600 &&
+        isFixedScenarioAlliance(
+          this.mg,
+          alliance.requestor(),
+          alliance.recipient(),
+        )
+      ) {
+        alliance.extend();
+        continue;
+      }
       if (alliance.expiresAt() <= this.mg.ticks()) {
         alliance.expire();
       }

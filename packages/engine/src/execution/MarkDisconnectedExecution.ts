@@ -42,6 +42,11 @@ export class MarkDisconnectedExecution implements Execution {
     return false;
   }
 
+  /** Not held up by a congress vote (Politics). */
+  activeDuringFreeze(): boolean {
+    return true;
+  }
+
   snapshot(w: SnapshotWriter): ExecRecord {
     return MarkDisconnectedExecutionSnapshot.write({
       player: w.player(this.player),

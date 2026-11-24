@@ -67,6 +67,7 @@ import { loadGatekeeper } from "./Gatekeeper";
 import { MapPlaylist } from "./MapPlaylist";
 import { setNoStoreHeaders } from "./NoStoreHeaders";
 import { PrivilegeRefresher } from "./PrivilegeRefresher";
+import { publicMatchesEnabled } from "./PublicMatches";
 import { startRankedCheckinLoops } from "./RankedCheckin";
 import { rejoinOrClose } from "./Rejoin";
 import { ServerEnv } from "./ServerEnv";
@@ -211,6 +212,12 @@ export function registerListingRoute(opts: {
         return res.status(400).json({ error: z.prettifyError(parsed.error) });
       }
       const { listed, autoStartMs, maxPlayers } = parsed.data;
+      // Private matches only: nothing goes into the public lobby browser.
+      if (listed && !publicMatchesEnabled()) {
+        return res
+          .status(403)
+          .json({ error: "Public matches are disabled on this server" });
+      }
 
       const game = gm.game(req.params.id);
       if (game === null) {

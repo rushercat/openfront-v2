@@ -377,6 +377,8 @@ export function resolveKeybindLabel(
   if (valueCode.startsWith("Shift+")) {
     isShift = true;
     codeToResolve = valueCode.slice(6);
+  } else if (valueCode.startsWith("Alt+")) {
+    return formatKeyForDisplay(valueCode);
   }
 
   if (
@@ -409,6 +411,9 @@ export function formatKeyForDisplay(value: string): string {
   // Handle Shift+ prefix: format as "Shift+X"
   if (value.startsWith("Shift+")) {
     return getKeybindShiftPrefix() + formatKeyForDisplay(value.slice(6));
+  }
+  if (value.startsWith("Alt+")) {
+    return "Alt+" + formatKeyForDisplay(value.slice(4));
   }
 
   // Handle space character or "Space" key

@@ -221,6 +221,50 @@ export class UnitGrid<U extends UnitLike = UnitLike> {
     return nearby;
   }
 
+  /**
+   * Visits the units nearbyUnits() would return, in the same order, without
+   * building the result array (the hot target searches of warships and
+   * aircraft run it for every unit every tick). Same filters: active, in
+   * range, and not under construction unless asked for.
+   */
+  forEachNearbyUnit(
+    tile: TileRef,
+    searchRange: number,
+    types: readonly UnitType[],
+    visit: (unit: U, distSquared: number) => void,
+    includeUnderConstruction: boolean = false,
+  ): void {
+    const gm = this.gm;
+    const x = gm.x(tile);
+    const y = gm.y(tile);
+    const { startGridX, endGridX, startGridY, endGridY } = this.getCellsInRange(
+      tile,
+      searchRange,
+    );
+    const rangeSquared = searchRange * searchRange;
+    for (let cy = startGridY; cy <= endGridY; cy++) {
+      const row = this.grid[cy];
+      for (let cx = startGridX; cx <= endGridX; cx++) {
+        const cell = row[cx];
+        for (let i = 0; i < types.length; i++) {
+          const unitSet = cell.get(types[i]);
+          if (unitSet === undefined) continue;
+          for (const unit of unitSet) {
+            if (!unit.isActive()) continue;
+            if (!includeUnderConstruction && unit.isUnderConstruction())
+              continue;
+            const unitTile = unit.tile();
+            const dx = gm.x(unitTile) - x;
+            const dy = gm.y(unitTile) - y;
+            const distSquared = dx * dx + dy * dy;
+            if (distSquared > rangeSquared) continue;
+            visit(unit, distSquared);
+          }
+        }
+      }
+    }
+  }
+
   private unitIsInRange(
     unit: U,
     tile: TileRef,

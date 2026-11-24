@@ -23,6 +23,11 @@ export class PauseExecution implements Execution {
     return true;
   }
 
+  /** Not held up by a congress vote (Politics). */
+  activeDuringFreeze(): boolean {
+    return true;
+  }
+
   init(game: Game, ticks: number): void {
     if (
       this.player.isLobbyCreator() ||

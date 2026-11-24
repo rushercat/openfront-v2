@@ -974,6 +974,7 @@ describe("NationStructureBehavior.doHandleStructures — crowded-map exception",
         }),
         startingGold: () => 0n,
       }),
+      draft: () => null, // no draft / epochs mode
       sharedWaterComponents: () => null, // landlocked -> Factory preferred
       nations: () => Array(400).fill({}),
       numLandTiles: () => 1_000_000, // 400 / 1_000_000 > 1/7500 -> high density
@@ -983,6 +984,7 @@ describe("NationStructureBehavior.doHandleStructures — crowded-map exception",
   function makeCrowdedPlayer(): any {
     return {
       unitsOwned: () => 0, // never owns a city
+      units: () => [], // no structures, so none to repair
       numTilesOwned: () => 100_000,
       info: () => ({}),
     };

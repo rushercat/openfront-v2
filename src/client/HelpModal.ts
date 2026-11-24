@@ -1168,6 +1168,230 @@ export class HelpModal extends BaseModal {
                   </tr>
                   <tr class="bg-white/5 hover:bg-white/10 transition-colors">
                     <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.aa_defense")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/AADefenseIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_aa_defense_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.airfield")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/AirfieldIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_airfield_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.fighter_jet")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/FighterJetIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_fighter_jet_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.bomber")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/BomberIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_bomber_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.rail_depot")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/RailDepotIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_rail_depot_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.tank")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/TankIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_tank_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.nuclear_submarine")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/NuclearSubmarineIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_nuclear_submarine_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.land_mine")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/LandMineIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_land_mine_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.sea_mine")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/SeaMineIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_sea_mine_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.repair_station")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/RepairStationIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_repair_station_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.aircraft_carrier")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/AircraftCarrierIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_aircraft_carrier_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.cruise_missile")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/CruiseMissileIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_cruise_missile_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.transport_plane")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/TransportPlaneIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_transport_plane_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
+                      ${translateText("unit_type.capital")}
+                    </td>
+                    <td class="py-3 border-b border-white/5">
+                      <img
+                        src=${assetUrl("images/CapitalIconWhite.svg")}
+                        class="w-8 h-8 scale-75 origin-left"
+                      />
+                    </td>
+                    <td
+                      class="py-3 border-b border-white/5 text-white/60 text-sm"
+                    >
+                      ${translateText("help_modal.build_capital_desc")}
+                    </td>
+                  </tr>
+                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
+                    <td class="py-3 ps-4 border-b border-white/5 font-medium">
                       ${translateText("unit_type.atom_bomb")}
                     </td>
                     <td class="py-3 border-b border-white/5">

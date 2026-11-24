@@ -1,17 +1,23 @@
 import {
+  CustomGameMap,
   Difficulty,
   GameMapSize,
+  GameFeature,
   GameMapType,
   GameMode,
   GameType,
+  HistoricalScenarioId,
   listedMaps,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
 import type { SnapshotHeader } from "@openfront/engine-api/game/SnapshotHeader";
 import { MAX_BOTS, TeamCountConfig } from "@openfront/engine-api/Schemas";
+import type { DraftConfig } from "@openfront/engine-api/Schemas";
 import { DoomsdayClockSpeed } from "@openfront/engine-lib/game/DoomsdayClock";
+import { historicalScenario } from "@openfront/engine-lib/game/HistoricalScenarios";
 import { UserMeResponse } from "@openfront/shared/ApiSchemas";
 import { assetUrl } from "@openfront/shared/AssetUrls";
+import type { CustomMapInfo } from "@openfront/shared/CustomMaps";
 import {
   generateID,
   generateSingleplayerGameID,
@@ -20,20 +26,23 @@ import { PlayerCosmetics } from "@openfront/shared/WireSchemas";
 import { html, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { showToast, translateText } from "../client/Utils";
-import { responseHasLinkedIdentity } from "./AccountIdentity";
 import "./components/baseComponents/Button";
 import "./components/baseComponents/Modal";
-import { BaseModal } from "./components/BaseModal";
+import { responseHasLinkedIdentity } from "./AccountIdentity";
+import "./components/DraftSettingsPanel";
 import "./components/GameConfigSettings";
-import "./components/LobbyPresetControls";
+import { BaseModal } from "./components/BaseModal";
+import "./components/ScenarioAssignmentPanel";
 import { MEDAL_ORDER, medalIcon } from "./components/map/Medals";
+import "./components/LobbyPresetControls";
 import {
   type LoadSavedGameDetail,
   savedGameIdFrom,
 } from "./components/SavedGamesPanel";
-import "./components/ToggleInputCard";
 import { modalHeader } from "./components/ui/ModalHeader";
+import "./components/ToggleInputCard";
 import { getPlayerCosmetics, prewarmCosmetics } from "./Cosmetics";
+import { ensureCustomMapLoaded, listCustomMaps } from "./CustomMapsApi";
 import { gamePortal } from "./GamePortal";
 import { GameStartingModal } from "./GameStartingModal";
 import { showInGameAlert } from "./InGameModal";
@@ -50,9 +59,14 @@ import { lastUserMeResponse } from "./UserMeBroadcast";
 import { UsernameInput } from "./UsernameInput";
 import { UserSettings } from "./UserSettings";
 import {
+  applyComplexity,
+  ComplexityLevel,
+} from "./utilities/ComplexityPresets";
+import {
   getBotsForCompactMap,
   getNationsForCompactMap,
   getRandomMapType,
+  getUpdatedDisabledFeatures,
   getUpdatedDisabledUnits,
   nationsConfigToSlider,
   parseBoundedFloatFromInput,
@@ -126,7 +140,26 @@ const TUTORIAL_DISABLED_UNITS: UnitType[] = [
   UnitType.SAMLauncher,
   UnitType.HydrogenBomb,
   UnitType.MIRV,
+  UnitType.AADefense,
+  UnitType.Airfield,
+  UnitType.FighterJet,
+  UnitType.Bomber,
+  UnitType.NuclearSubmarine,
+  UnitType.RailDepot,
+  UnitType.Tank,
+  UnitType.LandMine,
+  UnitType.SeaMine,
+  UnitType.RepairStation,
+  UnitType.AircraftCarrier,
+  UnitType.CruiseMissile,
+  UnitType.TransportPlane,
 ];
+
+/** The tutorial keeps to the classic game. */
+const TUTORIAL_DISABLED_FEATURES: GameFeature[] = Object.values(GameFeature);
+
+/** Stands in for the player's clientID (minted at start) in the scenario panel. */
+const SP_SELF = "self";
 
 const DEFAULT_OPTIONS = {
   selectedMap: GameMapType.World,
@@ -147,6 +180,7 @@ const DEFAULT_OPTIONS = {
   startingGold: false,
   startingGoldValue: undefined as number | undefined,
   disabledUnits: [] as UnitType[],
+  disabledFeatures: [] as GameFeature[],
   customAlliances: false,
   customAllianceMinutes: undefined as number | undefined,
   waterNukes: false,
@@ -218,6 +252,14 @@ export class SinglePlayerModal extends BaseModal {
   @state() private randomSpawn: boolean = DEFAULT_OPTIONS.randomSpawn;
   @state() private useRandomMap: boolean = DEFAULT_OPTIONS.useRandomMap;
   @state() private gameMode: GameMode = DEFAULT_OPTIONS.gameMode;
+  // openfront v2: uploaded custom maps, and the historical scenario mode.
+  @state() private customMaps: CustomMapInfo[] | null = null;
+  @state() private customMapsError = false;
+  @state() private selectedCustomMapId: string | null = null;
+  @state() private historicalScenario: HistoricalScenarioId | null = null;
+  @state() private scenarioMissions = false;
+  /** The scenario nation the player picked (null: the first great power). */
+  @state() private scenarioNation: string | null = null;
   @state() private teamCount: TeamCountConfig = DEFAULT_OPTIONS.teamCount;
   @state() private showAchievements: boolean = false;
   @state() private mapWins: Map<GameMapType, Set<Difficulty>> = new Map();
@@ -235,6 +277,11 @@ export class SinglePlayerModal extends BaseModal {
   @state() private disabledUnits: UnitType[] = [
     ...DEFAULT_OPTIONS.disabledUnits,
   ];
+  @state() private disabledFeatures: GameFeature[] = [
+    ...DEFAULT_OPTIONS.disabledFeatures,
+  ];
+  /** The draft mode (GameConfig.draft). */
+  @state() private draftConfig: DraftConfig = { enabled: false };
   @state() private customAlliances: boolean = DEFAULT_OPTIONS.customAlliances;
   @state() private customAllianceMinutes: number | undefined =
     DEFAULT_OPTIONS.customAllianceMinutes;
@@ -566,6 +613,13 @@ export class SinglePlayerModal extends BaseModal {
                 useRandom: this.useRandomMap,
                 showMedals: this.showAchievements,
                 mapWins: this.mapWins,
+                customMaps: this.customMaps,
+                customMapsError: this.customMapsError,
+                selectedCustomMapId: this.selectedCustomMapId,
+              },
+              scenario: {
+                selected: this.historicalScenario,
+                missions: this.scenarioMissions,
               },
               difficulty: {
                 selected: this.selectedDifficulty,
@@ -589,6 +643,7 @@ export class SinglePlayerModal extends BaseModal {
                   defaultValue: this.defaultNationCount,
                   labelKey: "game_settings.nations",
                   disabledKey: "common.disabled",
+                  hidden: this.historicalScenario !== null,
                 },
                 toggles: [
                   {
@@ -626,9 +681,14 @@ export class SinglePlayerModal extends BaseModal {
               unitTypes: {
                 titleKey: "game_settings.disable_units",
                 disabledUnits: this.disabledUnits,
+                disabledFeatures: this.disabledFeatures,
               },
             }}
             @map-selected=${this.handleConfigMapSelected}
+            @custom-map-selected=${this.handleConfigCustomMapSelected}
+            @custom-maps-refresh=${this.handleConfigCustomMapsRefresh}
+            @scenario-selected=${this.handleConfigScenarioSelected}
+            @scenario-missions-changed=${this.handleScenarioMissions}
             @random-map-selected=${this.handleConfigRandomMapSelected}
             @difficulty-selected=${this.handleConfigDifficultySelected}
             @doomsday-clock-speed-selected=${
@@ -640,7 +700,39 @@ export class SinglePlayerModal extends BaseModal {
             @nations-changed=${this.handleNationsChange}
             @option-toggle-changed=${this.handleConfigOptionToggleChanged}
             @unit-toggle-changed=${this.handleConfigUnitToggleChanged}
+            @feature-toggle-changed=${this.handleConfigFeatureToggleChanged}
+            @complexity-selected=${this.handleComplexitySelected}
           ></game-config-settings>
+          <draft-settings-panel
+            .config=${this.draftConfig}
+            @draft-config-changed=${this.handleDraftConfigChanged}
+          ></draft-settings-panel>
+          ${
+            this.historicalScenario !== null
+              ? html`<scenario-assignment-panel
+                  class="block mt-6"
+                  .scenarioId=${this.historicalScenario}
+                  .players=${[
+                    {
+                      clientID: SP_SELF,
+                      username: translateText("historical_scenario.you"),
+                    },
+                  ]}
+                  .assignments=${
+                    this.scenarioNation === null
+                      ? {}
+                      : { [SP_SELF]: this.scenarioNation }
+                  }
+                  .editable=${true}
+                  .myClientID=${SP_SELF}
+                  @scenario-assignment=${(e: Event) => {
+                    this.scenarioNation = (
+                      e as CustomEvent<{ nation: string | null }>
+                    ).detail.nation;
+                  }}
+                ></scenario-assignment-panel>`
+              : ""
+          }
         </div>
 
         <!-- Footer Action -->
@@ -694,7 +786,8 @@ export class SinglePlayerModal extends BaseModal {
       (this.doomsdayClock &&
         this.doomsdayClockSpeed !== DEFAULT_OPTIONS.doomsdayClockSpeed) ||
       this.overtime !== DEFAULT_OPTIONS.overtime ||
-      this.disabledUnits.length > 0
+      this.disabledUnits.length > 0 ||
+      this.disabledFeatures.length > 0
     );
   }
 
@@ -764,6 +857,7 @@ export class SinglePlayerModal extends BaseModal {
             // and the atom bomb the player fires from the silo once captured;
             // the gold is that one bomb's.
             disabledUnits: TUTORIAL_DISABLED_UNITS,
+            disabledFeatures: TUTORIAL_DISABLED_FEATURES,
             startingGold: 750_000,
             tutorial: true,
           },
@@ -798,6 +892,9 @@ export class SinglePlayerModal extends BaseModal {
     this.starting = false;
     this.selectedPresetName = "";
     this.selectedMap = DEFAULT_OPTIONS.selectedMap;
+    this.selectedCustomMapId = null;
+    this.historicalScenario = null;
+    this.scenarioNation = null;
     this.selectedDifficulty = DEFAULT_OPTIONS.selectedDifficulty;
     this.gameMode = DEFAULT_OPTIONS.gameMode;
     this.useRandomMap = DEFAULT_OPTIONS.useRandomMap;
@@ -813,6 +910,7 @@ export class SinglePlayerModal extends BaseModal {
     this.randomSpawn = DEFAULT_OPTIONS.randomSpawn;
     this.teamCount = DEFAULT_OPTIONS.teamCount;
     this.disabledUnits = [...DEFAULT_OPTIONS.disabledUnits];
+    this.disabledFeatures = [...DEFAULT_OPTIONS.disabledFeatures];
     this.goldMultiplier = DEFAULT_OPTIONS.goldMultiplier;
     this.goldMultiplierValue = DEFAULT_OPTIONS.goldMultiplierValue;
     this.startingGold = DEFAULT_OPTIONS.startingGold;
@@ -828,6 +926,7 @@ export class SinglePlayerModal extends BaseModal {
 
   protected onOpen(args?: Record<string, unknown>): void {
     this.lobbyPresets = this.userSettings.getLobbyPresets();
+    void this.loadCustomMaps();
     const save = args?.save;
     this.sharedSaveId = typeof save === "string" ? savedGameIdFrom(save) : null;
     // Saves made since the list last loaded (a game played in between).
@@ -859,6 +958,7 @@ export class SinglePlayerModal extends BaseModal {
       maxTimer: this.maxTimer,
       maxTimerValue: this.maxTimerValue,
       disabledUnits: [...this.disabledUnits],
+      disabledFeatures: [...this.disabledFeatures],
       goldMultiplier: this.goldMultiplier,
       goldMultiplierValue: this.goldMultiplierValue,
       startingGold: this.startingGold,
@@ -888,6 +988,9 @@ export class SinglePlayerModal extends BaseModal {
     this.maxTimer = config.maxTimer ?? false;
     this.maxTimerValue = config.maxTimerValue;
     this.disabledUnits = config.disabledUnits ? [...config.disabledUnits] : [];
+    this.disabledFeatures = config.disabledFeatures
+      ? [...config.disabledFeatures]
+      : [];
     this.goldMultiplier = config.goldMultiplier ?? false;
     this.goldMultiplierValue = config.goldMultiplierValue;
     this.startingGold = config.startingGold ?? false;
@@ -954,7 +1057,67 @@ export class SinglePlayerModal extends BaseModal {
     showToast(translateText("lobby_config.preset.deleted"), "green");
   };
 
+  private async loadCustomMaps() {
+    this.customMapsError = false;
+    try {
+      this.customMaps = await listCustomMaps();
+    } catch (e) {
+      console.warn("custom maps: listing failed:", e);
+      this.customMapsError = true;
+    }
+  }
+
+  private handleConfigCustomMapsRefresh = () => {
+    this.customMaps = null;
+    void this.loadCustomMaps();
+  };
+
+  private handleConfigCustomMapSelected = (e: Event) => {
+    const { id } = (e as CustomEvent<{ id: string }>).detail;
+    void this.handleCustomMapSelection(id);
+  };
+
+  private async handleCustomMapSelection(id: string) {
+    this.selectedCustomMapId = id;
+    this.useRandomMap = false;
+    this.historicalScenario = null;
+    try {
+      await ensureCustomMapLoaded(id);
+      if (this.selectedCustomMapId !== id) return;
+      const manifest = await this.mapLoader
+        .getMapData(CustomGameMap)
+        .manifest();
+      this.defaultNationCount = manifest.nations.length;
+      this.nations = manifest.nations.length;
+    } catch (e) {
+      console.warn("custom maps: loading the map failed:", e);
+      showToast(translateText("custom_maps.load_failed"), "red");
+    }
+  }
+
+  private handleConfigScenarioSelected = (e: Event) => {
+    const { id } = (e as CustomEvent<{ id: HistoricalScenarioId | null }>)
+      .detail;
+    this.historicalScenario = id;
+    if (id !== null) {
+      this.selectedCustomMapId = null;
+      this.useRandomMap = false;
+      this.selectedMap = historicalScenario(id).map;
+      this.gameMode = GameMode.FFA;
+      this.compactMap = false;
+      this.randomSpawn = false;
+      void this.loadNationCount();
+    }
+  };
+
+  private handleScenarioMissions = (e: Event) => {
+    this.scenarioMissions = (
+      e as CustomEvent<{ enabled: boolean }>
+    ).detail.enabled;
+  };
+
   private handleSelectRandomMap() {
+    this.selectedCustomMapId = null;
     this.useRandomMap = true;
     this.selectedMap = getRandomMapType();
     void this.loadNationCount();
@@ -965,6 +1128,7 @@ export class SinglePlayerModal extends BaseModal {
   };
 
   private handleMapSelection(value: GameMapType) {
+    this.selectedCustomMapId = null;
     this.selectedMap = value;
     this.useRandomMap = false;
     void this.loadNationCount();
@@ -1041,6 +1205,34 @@ export class SinglePlayerModal extends BaseModal {
       default:
         break;
     }
+  };
+
+  private handleDraftConfigChanged = (e: Event) => {
+    this.draftConfig = (
+      e as CustomEvent<{ config: DraftConfig }>
+    ).detail.config;
+  };
+
+  private handleConfigFeatureToggleChanged = (e: Event) => {
+    const { feature, checked } = (
+      e as CustomEvent<{ feature: GameFeature; checked: boolean }>
+    ).detail;
+    this.disabledFeatures = getUpdatedDisabledFeatures(
+      this.disabledFeatures,
+      feature,
+      checked,
+    );
+  };
+
+  private handleComplexitySelected = (e: Event) => {
+    const { level } = (e as CustomEvent<{ level: ComplexityLevel }>).detail;
+    const next = applyComplexity(
+      level,
+      this.disabledUnits,
+      this.disabledFeatures,
+    );
+    this.disabledUnits = next.disabledUnits;
+    this.disabledFeatures = next.disabledFeatures;
   };
 
   private handleConfigUnitToggleChanged = (e: Event) => {
@@ -1202,6 +1394,7 @@ export class SinglePlayerModal extends BaseModal {
 
   private handleGameModeSelection(value: GameMode) {
     this.gameMode = value;
+    this.historicalScenario = null;
   }
 
   private handleTeamCountSelection(value: TeamCountConfig) {
@@ -1331,12 +1524,33 @@ export class SinglePlayerModal extends BaseModal {
             },
           ],
           config: {
-            gameMap: this.selectedMap,
-            gameMapSize: this.compactMap
-              ? GameMapSize.Compact
-              : GameMapSize.Normal,
+            gameMap:
+              this.historicalScenario !== null
+                ? historicalScenario(this.historicalScenario).map
+                : this.selectedCustomMapId !== null
+                  ? CustomGameMap
+                  : this.selectedMap,
+            ...(this.historicalScenario === null &&
+            this.selectedCustomMapId !== null
+              ? { customMapId: this.selectedCustomMapId }
+              : {}),
+            ...(this.historicalScenario !== null
+              ? {
+                  historicalScenario: this.historicalScenario,
+                  scenarioAssignments:
+                    this.scenarioNation === null
+                      ? []
+                      : [{ clientID, nation: this.scenarioNation }],
+                  ...(this.scenarioMissions ? { scenarioMissions: true } : {}),
+                }
+              : {}),
+            gameMapSize:
+              this.compactMap && this.historicalScenario === null
+                ? GameMapSize.Compact
+                : GameMapSize.Normal,
             gameType: GameType.Singleplayer,
-            gameMode: this.gameMode,
+            gameMode:
+              this.historicalScenario === null ? this.gameMode : GameMode.FFA,
             playerTeams: this.teamCount,
             difficulty: this.selectedDifficulty,
             maxTimerValue: finalMaxTimerValue,
@@ -1346,9 +1560,12 @@ export class SinglePlayerModal extends BaseModal {
             donateTroops: this.gameMode === GameMode.Team,
             infiniteTroops: this.infiniteTroops,
             instantBuild: this.instantBuild,
-            randomSpawn: this.randomSpawn,
+            randomSpawn: this.historicalScenario === null && this.randomSpawn,
             disabledUnits: this.disabledUnits.filter((unit): unit is UnitType =>
               Object.values(UnitType).includes(unit),
+            ),
+            disabledFeatures: this.disabledFeatures.filter(
+              (f): f is GameFeature => Object.values(GameFeature).includes(f),
             ),
             nations: sliderToNationsConfig(
               this.nations,
@@ -1366,6 +1583,7 @@ export class SinglePlayerModal extends BaseModal {
               ? { customAllianceDuration: this.customAllianceMinutes ?? 0 }
               : {}),
             ...(this.waterNukes ? { waterNukes: true } : {}),
+            ...(this.draftConfig.enabled ? { draft: this.draftConfig } : {}),
             ...(this.doomsdayClock
               ? {
                   doomsdayClock: {

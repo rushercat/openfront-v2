@@ -79,6 +79,8 @@ export interface PlayerState {
   traitorRemainingTicks: number;
   inDoomsdayClock: boolean;
   isDecaying: boolean;
+  /** Freshly conquered land, percent of the player's land (unrest). */
+  unrestPercent?: number;
   markedDoomsdayClockTick: number;
   betrayals: number;
   hasSpawned: boolean;
@@ -124,6 +126,16 @@ export interface UnitState {
   samUpgradeStartRange: number | null;
   samUpgradeTargetLevel: number | null;
   samUpgradeDuration: number | null;
+  /** A nuclear submarine under water (only its owner sees it). */
+  submerged: boolean;
+  /**
+   * A nuclear submarine's mode: 0 submerged, 1 surfacing (it blinks and shows
+   * a progress bar until submarineReadyTick), 2 surfaced and ready to fire.
+   * Absent for everything else.
+   */
+  submarineMode?: number;
+  /** Tick a surfacing submarine can fire. */
+  submarineReadyTick?: number;
 }
 
 /** Minimal dead-unit data needed by the FX pass. */

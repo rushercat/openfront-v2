@@ -283,8 +283,9 @@ describe("Nation structure upgrades", () => {
     expect(upgraded()).toEqual([]);
   });
 
-  // Ports are due (cities disabled: one city per 2000 tiles), and nothing else is. Without silos
-  // the nation saves up for a SAM (1.5M).
+  // Ports are due (cities disabled: one city per 2000 tiles), and nothing else is: without
+  // aircraft there are no airfields or AA defenses to build. Without silos the nation saves
+  // up for a SAM (1.5M).
   function withPort(
     difficulty: Difficulty,
     { shortCoast, gold = 5_000_000n }: { shortCoast: boolean; gold?: bigint },
@@ -293,7 +294,13 @@ describe("Nation structure upgrades", () => {
       {
         difficulty,
         gameMode: ffa,
-        disabledUnits: [UnitType.City, UnitType.Factory, UnitType.MissileSilo],
+        disabledUnits: [
+          UnitType.City,
+          UnitType.Factory,
+          UnitType.MissileSilo,
+          UnitType.FighterJet,
+          UnitType.Bomber,
+        ],
       },
       { size: 200 },
     );

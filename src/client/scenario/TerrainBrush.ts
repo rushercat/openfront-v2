@@ -5,7 +5,7 @@
  */
 
 import type { DocumentEditor, Edit } from "./DocumentEditor";
-import { isOwnable } from "./ScenarioDocument";
+import { IMPASSABLE, isOwnable, land } from "./ScenarioDocument";
 
 /**
  * The tiles within `radius` of tile (cx, cy), clipped to a `width` x
@@ -101,10 +101,10 @@ function addDisc(
 export class BrushStroke {
   private last: { x: number; y: number } | null = null;
   private readonly pending = new Set<number>();
-  private changed = false;
+  protected changed = false;
 
   constructor(
-    private readonly editor: DocumentEditor,
+    protected readonly editor: DocumentEditor,
     readonly radius: number,
     /** Whether painting the tile would change it. */
     private readonly changes: (tile: number) => boolean,
@@ -177,5 +177,132 @@ export class TerritoryStroke extends BrushStroke {
       },
       (tiles) => ({ type: "set_owner", tiles, owner }),
     );
+  }
+}
+
+/** Elevation of a land byte, or null for water and impassable tiles. */
+export function landElevation(b: number): number | null {
+  if (b < 0x80 || b >= IMPASSABLE) return null;
+  return b & 0x1f;
+}
+
+/**
+ * openfront v2: land with automatic slopes. The brush itself paints land at
+ * `elevation` like the plain terrain brush; around it, `slopeWidth` tiles
+ * of land fall off towards the flat. The slope only ever raises land: a tile
+ * that is already as high or higher (another mountain) keeps its height, and
+ * water and impassable tiles stay. Afterwards the slopes are ordinary land
+ * that any brush can paint over.
+ */
+export class SlopeStroke extends BrushStroke {
+  private lastPos: { x: number; y: number } | null = null;
+  /** Tile → terrain byte this stroke will set. */
+  private readonly targets = new Map<number, number>();
+  /**
+   * What this stroke already sent. In a shared session the editor applies
+   * an edit only once the server echoes it, so the document can still show
+   * the old height: compare against this too, or a later, lower slope value
+   * could undercut an earlier, higher one.
+   */
+  private readonly sent = new Map<number, number>();
+
+  constructor(
+    editor: DocumentEditor,
+    private readonly elevation: number,
+    radius: number,
+    readonly slopeWidth: number,
+  ) {
+    super(
+      editor,
+      radius,
+      () => false,
+      (tiles) => ({ type: "set_terrain", tiles, terrain: [] }),
+    );
+  }
+
+  override moveTo(x: number, y: number): void {
+    const from = this.lastPos ?? { x, y };
+    // Bresenham, like lineTiles: one brush position per tile of the line.
+    const dx = Math.abs(x - from.x);
+    const dy = -Math.abs(y - from.y);
+    const sx = from.x < x ? 1 : -1;
+    const sy = from.y < y ? 1 : -1;
+    let err = dx + dy;
+    let cx = from.x;
+    let cy = from.y;
+    for (;;) {
+      this.stamp(cx, cy);
+      if (cx === x && cy === y) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) {
+        err += dy;
+        cx += sx;
+      }
+      if (e2 <= dx) {
+        err += dx;
+        cy += sy;
+      }
+    }
+    this.lastPos = { x, y };
+  }
+
+  /** The brush and its slope around tile (cx, cy). */
+  private stamp(cx: number, cy: number): void {
+    const { doc } = this.editor;
+    const { width, height } = doc;
+    const r = this.radius;
+    const outer = r + this.slopeWidth;
+    const core2 = r * r + r;
+    const x0 = Math.max(0, cx - outer);
+    const x1 = Math.min(width - 1, cx + outer);
+    const y0 = Math.max(0, cy - outer);
+    const y1 = Math.min(height - 1, cy + outer);
+    const coreByte = land(this.elevation);
+    for (let y = y0; y <= y1; y++) {
+      const ddy = y - cy;
+      for (let x = x0; x <= x1; x++) {
+        const ddx = x - cx;
+        const d2 = ddx * ddx + ddy * ddy;
+        const t = y * width + x;
+        if (d2 <= core2) {
+          // The brush itself: plain land at the chosen height.
+          if (doc.terrain[t] !== coreByte && this.sent.get(t) !== coreByte) {
+            this.targets.set(t, coreByte);
+          }
+          continue;
+        }
+        // Distance past the brush edge, 0..1 over the slope width.
+        const past = (Math.sqrt(d2) - (r + 0.5)) / (this.slopeWidth + 0.5);
+        if (past >= 1) continue;
+        // Falls off from the brush edge, a little gentler towards the foot.
+        const height = Math.round(this.elevation * Math.pow(1 - past, 1.3));
+        if (height <= 0) continue;
+        const current = landElevation(doc.terrain[t]);
+        if (current === null) continue;
+        const planned = this.targets.get(t);
+        const plannedHeight = planned === undefined ? -1 : planned & 0x1f;
+        const sent = this.sent.get(t);
+        const sentHeight = sent === undefined ? -1 : sent & 0x1f;
+        if (height <= current || height <= plannedHeight) continue;
+        if (height <= sentHeight) continue;
+        this.targets.set(t, land(height));
+      }
+    }
+  }
+
+  override flush(): void {
+    if (this.targets.size === 0) return;
+    const tiles: number[] = [];
+    const terrain: number[] = [];
+    for (const [t, b] of this.targets) {
+      if (this.editor.doc.terrain[t] === b) continue;
+      tiles.push(t);
+      terrain.push(b);
+      this.sent.set(t, b);
+    }
+    this.targets.clear();
+    if (tiles.length === 0) return;
+    this.editor.apply({ type: "set_terrain", tiles, terrain });
+    this.changed = true;
   }
 }

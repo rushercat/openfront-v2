@@ -25,6 +25,19 @@ import {
   EMOJI_WARSHIP_RETALIATION,
   NationEmojiBehavior,
 } from "./NationEmojiBehavior";
+import { aiUnitDisabled } from "./NationUtils";
+
+/** Hostile warships this close to a port we guard draw a squad. */
+const PORT_THREAT_RANGE = 80;
+/** Standing navy in a naval war: warships per port, and at most, by difficulty. */
+const NAVY_SHIPS_PER_PORT: Partial<Record<Difficulty, number>> = {
+  [Difficulty.Hard]: 0.5,
+  [Difficulty.Impossible]: 1,
+};
+const NAVY_MAX_SHIPS: Partial<Record<Difficulty, number>> = {
+  [Difficulty.Hard]: 4,
+  [Difficulty.Impossible]: 6,
+};
 
 export class NationWarshipBehavior {
   // Track our transport ships we currently own
@@ -76,7 +89,7 @@ export class NationWarshipBehavior {
 
   maybeSpawnWarship(): boolean {
     if (this.player === null) throw new Error("not initialized");
-    if (this.game.config().isUnitDisabled(UnitType.Warship)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.Warship)) {
       return false;
     }
     if (!this.random.chance(50)) {
@@ -137,7 +150,7 @@ export class NationWarshipBehavior {
 
   // Send out a warship if our transport ship got captured
   private trackTransportShipsAndRetaliate(): void {
-    if (this.game.config().isUnitDisabled(UnitType.TransportShip)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.TransportShip)) {
       return;
     }
     // Add any currently owned transport ships to our tracking set
@@ -308,7 +321,7 @@ export class NationWarshipBehavior {
   // Send a squad at the fleet blocking our boats, all at once or not at all:
   // Hard as many ships as they have, Impossible one more
   clearSeaLane(blocker: Unit): void {
-    if (this.game.config().isUnitDisabled(UnitType.Warship)) return;
+    if (aiUnitDisabled(this.game, this.player, UnitType.Warship)) return;
     const { difficulty } = this.game.config().gameConfig();
     const target = blocker.tile();
     const fleet = this.hostileWarshipsNear(target);
@@ -368,6 +381,89 @@ export class NationWarshipBehavior {
         new ConstructionExecution(this.player, UnitType.Warship, target),
       );
     }
+  }
+
+  /**
+   * Hard & Impossible defend their waters like good players:
+   * 1. Hostile warships near one of our ports (or a teammate's) get a squad
+   *    sent at them all at once, at least as many ships as they have there
+   *    (clearSeaLane: ships already at sea are pulled in first).
+   * 2. With hostile warships on the same water as our ports, a standing
+   *    navy patrols off our busiest ports.
+   */
+  defendWaters(): void {
+    const config = this.game.config();
+    if (aiUnitDisabled(this.game, this.player, UnitType.Warship)) return;
+    const { difficulty } = config.gameConfig();
+    const shipsPerPort = NAVY_SHIPS_PER_PORT[difficulty];
+    if (shipsPerPort === undefined) return;
+    const ports = this.player.units(UnitType.Port);
+    if (ports.length === 0) return;
+
+    // 1. The hostile warship closest to a port we guard
+    const guarded = [
+      ...ports,
+      ...this.game
+        .players()
+        .filter((p) => p !== this.player && this.player.isOnSameTeam(p))
+        .flatMap((p) => p.units(UnitType.Port)),
+    ];
+    let threat: Unit | null = null;
+    let threatDist = PORT_THREAT_RANGE * PORT_THREAT_RANGE;
+    for (const port of guarded) {
+      for (const { unit, distSquared } of this.game.nearbyUnits(
+        port.tile(),
+        PORT_THREAT_RANGE,
+        UnitType.Warship,
+      )) {
+        if (!unit.owner().canAttackPlayer(this.player, true)) continue;
+        if (this.player.isFriendly(unit.owner())) continue;
+        if (distSquared < threatDist) {
+          threat = unit;
+          threatDist = distSquared;
+        }
+      }
+    }
+    if (threat !== null) {
+      this.clearSeaLane(threat);
+      return;
+    }
+
+    // 2. A standing navy while hostile warships sail our waters
+    const ours = this.player.units(UnitType.Warship);
+    const wanted = Math.min(
+      NAVY_MAX_SHIPS[difficulty] ?? 0,
+      Math.ceil(ports.length * shipsPerPort),
+    );
+    if (ours.length >= wanted) return;
+    const ourWaters = new Set(
+      ports.map((p) => this.game.getWaterComponent(p.tile())),
+    );
+    const hostileAtSea = this.game
+      .units(UnitType.Warship)
+      .some(
+        (w) =>
+          w.owner() !== this.player &&
+          !this.player.isFriendly(w.owner()) &&
+          ourWaters.has(this.game.getWaterComponent(w.tile())),
+      );
+    if (!hostileAtSea) return;
+    if (this.spareGold() < this.cost(UnitType.Warship)) return;
+    // Off the port with the most levels that no ship of ours guards yet
+    const port = ports
+      .filter((p) => this.warshipsCovering(p.tile()).length === 0)
+      .sort((a, b) => b.level() - a.level() || a.id() - b.id())[0];
+    if (port === undefined) return;
+    const tile = this.warshipSpawnTile(port.tile(), 20);
+    if (
+      tile === null ||
+      this.player.canBuild(UnitType.Warship, tile) === false
+    ) {
+      return;
+    }
+    this.game.addExecution(
+      new ConstructionExecution(this.player, UnitType.Warship, tile),
+    );
   }
 
   private hostileWarshipsNear(tile: TileRef): number {
@@ -441,7 +537,7 @@ export class NationWarshipBehavior {
   }
 
   private shouldCounterWarshipInfestation(): boolean {
-    if (this.game.config().isUnitDisabled(UnitType.Warship)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.Warship)) {
       return false;
     }
 
@@ -603,10 +699,9 @@ export class NationWarshipBehavior {
 
   /** Gold for warships that don't stop an invasion: with atom bombs disabled, silo owners keep a hydrogen bomb's price for nukes. */
   private spareGold(): Gold {
-    const config = this.game.config();
     if (
-      !config.isUnitDisabled(UnitType.AtomBomb) ||
-      config.isUnitDisabled(UnitType.HydrogenBomb) ||
+      !aiUnitDisabled(this.game, this.player, UnitType.AtomBomb) ||
+      aiUnitDisabled(this.game, this.player, UnitType.HydrogenBomb) ||
       this.player.unitCount(UnitType.MissileSilo) === 0
     ) {
       return this.player.gold();

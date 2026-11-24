@@ -1,4 +1,8 @@
-import { GameMode } from "@openfront/engine-api/game/GameTypes";
+import {
+  CustomGameMap,
+  GameMapType,
+  GameMode,
+} from "@openfront/engine-api/game/GameTypes";
 import { GameConfig, GameConfigPatch } from "@openfront/engine-api/Schemas";
 import { adjustForTeams } from "@openfront/engine-lib/game/TeamAssignment";
 
@@ -25,6 +29,7 @@ const COPIED_KEYS = [
   "randomSpawn",
   "gameMode",
   "disabledUnits",
+  "disabledFeatures",
   "playerTeams",
   "allowedPublicIds",
   "trusted",
@@ -108,6 +113,21 @@ export function applyGameConfigPatch(
   // (the full config it sends has hostCheats: undefined when the toggle is
   // off), so `undefined` here means "clear", not "leave unchanged".
   target.hostCheats = patch.hostCheats;
+  // openfront v2: the custom map and the historical scenario follow the same
+  // rule, so the host can switch back to a stock map or leave the scenario.
+  target.customMapId = patch.customMapId;
+  target.historicalScenario = patch.historicalScenario;
+  target.scenarioAssignments = patch.scenarioAssignments;
+  target.scenarioMissions = patch.scenarioMissions;
+  // The draft mode: the host always sends it ({enabled:false} when off).
+  if (patch.draft !== undefined) target.draft = patch.draft;
+  // A Custom map needs its id; without one, fall back to a stock map.
+  if (target.gameMap === CustomGameMap && target.customMapId === undefined) {
+    target.gameMap = GameMapType.World;
+  }
+  if (target.gameMap !== CustomGameMap) {
+    target.customMapId = undefined;
+  }
 }
 
 // Whether the host-only cheat block actually grants anything: mere presence

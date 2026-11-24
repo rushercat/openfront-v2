@@ -22,6 +22,7 @@ import type {
   SnapshotReader,
   SnapshotWriter,
 } from "../snapshot/SnapshotContext";
+import { isScenarioNationPlayer } from "./HistoricalScenarioExecution";
 import { PlayerExecution } from "./PlayerExecution";
 import { TribeExecution } from "./TribeExecution";
 import { getSpawnTiles } from "./Util";
@@ -83,6 +84,16 @@ export class SpawnExecution implements Execution {
     // anything sent afterwards, and runs identically on every client, so a
     // rejected intent is a deterministic no-op rather than a desync.
     if (this.fromIntent && !this.queuedDuringSpawnPhase) {
+      return;
+    }
+
+    // A historical scenario placed this player in its nation
+    // (HistoricalScenarioExecution): it can't move elsewhere.
+    if (
+      this.fromIntent &&
+      player.hasSpawned() &&
+      isScenarioNationPlayer(this.mg, player)
+    ) {
       return;
     }
 

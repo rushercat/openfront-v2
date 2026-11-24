@@ -59,7 +59,30 @@ export type Edit =
 /** One undo step: the edits that undo a step, in order. */
 type Step = Edit[];
 
+/** What a shared step does to its sender's undo history. */
+export type StepKind = "do" | "undo" | "redo";
+
+/**
+ * Where a shared document's edits go (openfront v2, MapSession): to the
+ * session's server, which puts everyone's edits in one order and hands each
+ * back to every editor in it, the sender's own included (receive()). Nothing
+ * is applied before it comes back, so every copy of the document goes
+ * through the same edits in the same order.
+ */
+export interface EditRelay {
+  /** An edit of the sender's current step. */
+  edit(edit: Edit): void;
+  /** Ends the sender's current step (all edits sent since the last end). */
+  commit(kind: StepKind): void;
+  /** Sends a whole step at once (undo, redo). */
+  step(edits: Edit[], kind: StepKind): void;
+}
+
 export class DocumentEditor {
+  private relay: EditRelay | null = null;
+  // Shared: terrain written by other editors since their last step ended,
+  // which then gets the full terrain pass.
+  private externalTerrain = false;
   private undoStack: Step[] = [];
   private redoStack: Step[] = [];
   // The step being built: the inverse of each edit applied since the last
@@ -81,12 +104,22 @@ export class DocumentEditor {
    * changed nothing, if the edit can't apply.
    */
   apply(edit: Edit): void {
+    if (this.relay !== null) {
+      this.relay.edit(edit);
+      this.pendingShared = true;
+      return;
+    }
     this.run(edit);
     this.redoStack = [];
   }
 
   /** Ends the current step, which undo() then takes back as one. */
   commit(): void {
+    if (this.relay !== null) {
+      if (this.pendingShared) this.relay.commit("do");
+      this.pendingShared = false;
+      return;
+    }
     if (this.open.length > 0) this.undoStack.push(this.closeStep());
   }
 
@@ -101,12 +134,68 @@ export class DocumentEditor {
   undo(): void {
     this.commit();
     const step = this.undoStack.pop();
-    if (step !== undefined) this.redoStack.push(this.applyStep(step));
+    if (step === undefined) return;
+    // Shared: the undo goes out as a step of its own, and comes back.
+    if (this.relay !== null) this.relay.step(step, "undo");
+    else this.redoStack.push(this.applyStep(step));
   }
 
   redo(): void {
     const step = this.redoStack.pop();
-    if (step !== undefined) this.undoStack.push(this.applyStep(step));
+    if (step === undefined) return;
+    if (this.relay !== null) this.relay.step(step, "redo");
+    else this.undoStack.push(this.applyStep(step));
+  }
+
+  // ---- Shared documents (MapSession) ----
+
+  // Whether edits went to the relay since the last commit.
+  private pendingShared = false;
+
+  /** Shares the document from now on (null: back to editing alone). */
+  setRelay(relay: EditRelay | null): void {
+    this.commit();
+    this.relay = relay;
+  }
+
+  isShared(): boolean {
+    return this.relay !== null;
+  }
+
+  /**
+   * Applies a shared step's edits as the session ordered them. Own edits
+   * build this editor's undo history; other editors' edits only change the
+   * document. An edit that no longer applies (say, to a nation someone just
+   * removed) is skipped; every copy skips it alike, as they are all in the
+   * same state.
+   */
+  receive(edits: readonly Edit[], own: boolean, commit: StepKind | null): void {
+    for (const edit of edits) {
+      try {
+        if (own) {
+          this.run(edit);
+        } else {
+          this.applyEdit(edit);
+          if (edit.type === "set_terrain") this.externalTerrain = true;
+        }
+      } catch (e) {
+        console.warn("shared map: skipped an edit that no longer applies:", e);
+      }
+    }
+    if (commit === null) return;
+    if (own) {
+      if (this.open.length === 0) return;
+      const step = this.closeStep();
+      if (commit === "undo") {
+        this.redoStack.push(step);
+      } else {
+        this.undoStack.push(step);
+        if (commit === "do") this.redoStack = [];
+      }
+    } else if (this.externalTerrain) {
+      this.externalTerrain = false;
+      this.send({ type: "end_terrain_edit" });
+    }
   }
 
   /** Applies a step and returns the step that undoes it. */

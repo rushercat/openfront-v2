@@ -274,6 +274,9 @@ const STRUCTURES = [
   UnitType.DefensePost,
   UnitType.SAMLauncher,
   UnitType.MissileSilo,
+  UnitType.AADefense,
+  UnitType.Airfield,
+  UnitType.RailDepot,
 ] as const;
 
 function nearbyWater(
@@ -337,6 +340,18 @@ function buildStructureIntent(
     rand.chance(2)
   ) {
     unit = UnitType.SAMLauncher;
+  } else if (
+    p.units(UnitType.Airfield).length === 0 &&
+    canAfford(game, p, UnitType.Airfield) &&
+    rand.chance(2)
+  ) {
+    unit = UnitType.Airfield;
+  } else if (
+    p.units(UnitType.AADefense).length === 0 &&
+    canAfford(game, p, UnitType.AADefense) &&
+    rand.chance(2)
+  ) {
+    unit = UnitType.AADefense;
   } else {
     const affordable = STRUCTURES.filter((t) => canAfford(game, p, t));
     const picked = pick(rand, affordable);
@@ -372,6 +387,254 @@ function buildWarshipIntent(
     return null;
   }
   return { type: "build_unit", unit: UnitType.Warship, tile: water };
+}
+
+/** Where a scripted human sends aircraft: at an enemy AA Defense if there is one. */
+function airTargetTile(
+  game: Game,
+  p: Player,
+  rand: PseudoRandom,
+  other: Player | null,
+): TileRef | null {
+  const aaDefenses = game
+    .units(UnitType.AADefense)
+    .filter((a) => !p.isFriendly(a.owner(), true) && a.owner() !== p);
+  const aa = pick(rand, aaDefenses);
+  if (aa !== null) return aa.tile();
+  return other === null ? null : randomOwnedTile(rand, other);
+}
+
+function buildAircraftIntent(
+  game: Game,
+  p: Player,
+  rand: PseudoRandom,
+  other: Player | null,
+): Intent | null {
+  const unit = rand.chance(2) ? UnitType.Bomber : UnitType.FighterJet;
+  if (!canAfford(game, p, unit)) return null;
+  const tile = airTargetTile(game, p, rand, other);
+  if (tile === null || p.canBuild(unit, tile) === false) return null;
+  return { type: "build_unit", unit, tile };
+}
+
+function moveAircraftIntent(
+  game: Game,
+  p: Player,
+  rand: PseudoRandom,
+  other: Player | null,
+): Intent | null {
+  const plane = pick(rand, p.units(UnitType.FighterJet, UnitType.Bomber));
+  if (plane === null) return null;
+  const tile = airTargetTile(game, p, rand, other);
+  if (tile === null) return null;
+  return { type: "move_warship", unitIds: [plane.id()], tile };
+}
+
+/** Rail depots and tanks, nuclear submarines, land and sea mines. */
+function groundAndNavalIntent(
+  game: Game,
+  p: Player,
+  rand: PseudoRandom,
+  other: Player | null,
+): Intent | null {
+  const finished = (types: UnitType[]) =>
+    p.units(types).filter((u) => u.isActive() && !u.isUnderConstruction());
+  switch (rand.nextInt(0, 6)) {
+    case 0: {
+      if (!canAfford(game, p, UnitType.RailDepot)) return null;
+      const factory = pick(rand, finished([UnitType.Factory]));
+      if (factory === null) return null;
+      for (let i = 0; i < 10; i++) {
+        const tile = randomOwnedTile(rand, p);
+        if (tile !== null && p.canBuild(UnitType.RailDepot, tile) !== false) {
+          return { type: "build_unit", unit: UnitType.RailDepot, tile };
+        }
+      }
+      return null;
+    }
+    case 1: {
+      if (
+        finished([UnitType.Factory]).length === 0 ||
+        p.units(UnitType.Tank).length >= 2 ||
+        !canAfford(game, p, UnitType.Tank)
+      ) {
+        return null;
+      }
+      const tile =
+        (other !== null ? randomOwnedTile(rand, other) : null) ??
+        randomOwnedTile(rand, p);
+      if (tile === null || p.canBuild(UnitType.Tank, tile) === false) {
+        return null;
+      }
+      return { type: "build_unit", unit: UnitType.Tank, tile };
+    }
+    case 2: {
+      const tank = pick(rand, p.units(UnitType.Tank));
+      const tile = other !== null ? randomOwnedTile(rand, other) : null;
+      if (tank === null || tile === null) return null;
+      return { type: "move_warship", unitIds: [tank.id()], tile };
+    }
+    case 3: {
+      const port = pick(rand, finished([UnitType.Port]));
+      if (
+        port === null ||
+        p.units(UnitType.NuclearSubmarine).length >= 1 ||
+        !canAfford(game, p, UnitType.NuclearSubmarine)
+      ) {
+        return null;
+      }
+      const water = nearbyWater(game, port.tile(), rand);
+      if (
+        water === null ||
+        p.canBuild(UnitType.NuclearSubmarine, water) === false
+      ) {
+        return null;
+      }
+      return {
+        type: "build_unit",
+        unit: UnitType.NuclearSubmarine,
+        tile: water,
+      };
+    }
+    case 4: {
+      const sub = pick(rand, p.units(UnitType.NuclearSubmarine));
+      if (sub === null) return null;
+      if (sub.isSubmerged()) {
+        return { type: "surface_submarine", unitId: sub.id() };
+      }
+      // Not with water nukes: each one rewrites the water graph, and the
+      // pathfinders' graph lags the map by up to 20 ticks, which a restore
+      // in that window does not reproduce (an existing limitation, not the
+      // submarine's). The other variants exercise submarine launches.
+      if (game.config().gameConfig().waterNukes) return null;
+      const tile = other !== null ? randomOwnedTile(rand, other) : null;
+      if (
+        tile === null ||
+        !canAfford(game, p, UnitType.AtomBomb) ||
+        p.canBuild(UnitType.AtomBomb, tile) === false
+      ) {
+        return null;
+      }
+      return { type: "build_unit", unit: UnitType.AtomBomb, tile };
+    }
+    case 5: {
+      if (rand.chance(2)) {
+        if (!canAfford(game, p, UnitType.LandMine)) return null;
+        const tile = randomOwnedTile(rand, p);
+        if (tile === null || p.canBuild(UnitType.LandMine, tile) === false) {
+          return null;
+        }
+        return { type: "build_unit", unit: UnitType.LandMine, tile };
+      }
+      if (!canAfford(game, p, UnitType.SeaMine)) return null;
+      const shore = pick(
+        rand,
+        [...p.borderTiles()].filter((t) => game.isShore(t)),
+      );
+      const water = shore === null ? null : nearbyWater(game, shore, rand);
+      if (water === null || p.canBuild(UnitType.SeaMine, water) === false) {
+        return null;
+      }
+      return { type: "build_unit", unit: UnitType.SeaMine, tile: water };
+    }
+  }
+  return null;
+}
+
+/** Carriers, cruise missiles, paratroopers and moving the capital. */
+function modernWarfareIntent(
+  game: Game,
+  p: Player,
+  rand: PseudoRandom,
+  other: Player | null,
+): Intent | null {
+  const finished = (types: UnitType[]) =>
+    p.units(types).filter((u) => u.isActive() && !u.isUnderConstruction());
+  switch (rand.nextInt(0, 5)) {
+    // A rail depot to go with the tanks.
+    case 4: {
+      if (!canAfford(game, p, UnitType.RailDepot)) return null;
+      if (finished([UnitType.Factory]).length === 0) return null;
+      for (let i = 0; i < 10; i++) {
+        const tile = randomOwnedTile(rand, p);
+        if (tile !== null && p.canBuild(UnitType.RailDepot, tile) !== false) {
+          return { type: "build_unit", unit: UnitType.RailDepot, tile };
+        }
+      }
+      return null;
+    }
+    case 0: {
+      const port = pick(rand, finished([UnitType.Port]));
+      if (
+        port === null ||
+        p.units(UnitType.AircraftCarrier).length >= 1 ||
+        !canAfford(game, p, UnitType.AircraftCarrier)
+      ) {
+        return null;
+      }
+      const water = nearbyWater(game, port.tile(), rand);
+      if (
+        water === null ||
+        p.canBuild(UnitType.AircraftCarrier, water) === false
+      ) {
+        return null;
+      }
+      return {
+        type: "build_unit",
+        unit: UnitType.AircraftCarrier,
+        tile: water,
+      };
+    }
+    case 1: {
+      const target =
+        other === null
+          ? null
+          : pick(
+              rand,
+              other.units(UnitType.City, UnitType.Port, UnitType.Factory),
+            );
+      if (
+        target === null ||
+        !canAfford(game, p, UnitType.CruiseMissile) ||
+        p.canBuild(UnitType.CruiseMissile, target.tile()) === false
+      ) {
+        return null;
+      }
+      return {
+        type: "build_unit",
+        unit: UnitType.CruiseMissile,
+        tile: target.tile(),
+      };
+    }
+    case 2: {
+      const tile = other === null ? null : randomOwnedTile(rand, other);
+      if (
+        tile === null ||
+        !canAfford(game, p, UnitType.TransportPlane) ||
+        p.canBuild(UnitType.TransportPlane, tile) === false
+      ) {
+        return null;
+      }
+      return {
+        type: "build_unit",
+        unit: UnitType.TransportPlane,
+        tile,
+        troops: Math.floor(p.troops() / 10),
+      };
+    }
+    case 3: {
+      const city = pick(rand, finished([UnitType.City]));
+      if (
+        city === null ||
+        !canAfford(game, p, UnitType.Capital) ||
+        p.canBuild(UnitType.Capital, city.tile()) === false
+      ) {
+        return null;
+      }
+      return { type: "build_unit", unit: UnitType.Capital, tile: city.tile() };
+    }
+  }
+  return null;
 }
 
 function launchBombIntent(
@@ -463,6 +726,26 @@ function playIntent(game: Game, p: Player, rand: PseudoRandom): Intent | null {
   const other = pick(rand, others);
   const own = (types: UnitType[]) => p.units(types);
 
+  if (
+    own([UnitType.Airfield]).some(
+      (a) => a.isActive() && !a.isUnderConstruction(),
+    ) &&
+    own([UnitType.FighterJet, UnitType.Bomber]).length < 2 &&
+    rand.chance(2)
+  ) {
+    const aircraftIntent = buildAircraftIntent(game, p, rand, other);
+    if (aircraftIntent !== null) return aircraftIntent;
+  }
+
+  // A submarine lurking under water surfaces now and then.
+  const submerged = pick(
+    rand,
+    own([UnitType.NuclearSubmarine]).filter((s) => s.isSubmerged()),
+  );
+  if (submerged !== null && rand.chance(4)) {
+    return { type: "surface_submarine", unitId: submerged.id() };
+  }
+
   const readySilo = own([UnitType.MissileSilo]).some(
     (s) => s.isActive() && !s.isInCooldown() && !s.isUnderConstruction(),
   );
@@ -474,6 +757,25 @@ function playIntent(game: Game, p: Player, rand: PseudoRandom): Intent | null {
         s.isActive() &&
         !s.isUnderConstruction(),
     );
+  // A ready silo fires a cruise missile now and then.
+  if (readySilo && other !== null && rand.chance(6)) {
+    const target = pick(
+      rand,
+      other.units(UnitType.City, UnitType.Port, UnitType.Factory),
+    );
+    if (
+      target !== null &&
+      canAfford(game, p, UnitType.CruiseMissile) &&
+      p.canBuild(UnitType.CruiseMissile, target.tile()) !== false
+    ) {
+      return {
+        type: "build_unit",
+        unit: UnitType.CruiseMissile,
+        tile: target.tile(),
+      };
+    }
+  }
+
   if (
     readySilo &&
     enemySam &&
@@ -484,7 +786,15 @@ function playIntent(game: Game, p: Player, rand: PseudoRandom): Intent | null {
     if (bombIntent !== null) return bombIntent;
   }
 
-  switch (rand.nextInt(0, 22)) {
+  switch (rand.nextInt(0, 30)) {
+    case 24:
+    case 25:
+    case 26:
+      return groundAndNavalIntent(game, p, rand, other);
+    case 27:
+    case 28:
+    case 29:
+      return modernWarfareIntent(game, p, rand, other);
     case 0:
     case 1:
     case 2: {
@@ -585,6 +895,10 @@ function playIntent(game: Game, p: Player, rand: PseudoRandom): Intent | null {
         type: "mark_disconnected",
         isDisconnected: !p.isDisconnected() && rand.chance(3),
       };
+    case 22:
+      return buildAircraftIntent(game, p, rand, other);
+    case 23:
+      return moveAircraftIntent(game, p, rand, other);
   }
   return null;
 }

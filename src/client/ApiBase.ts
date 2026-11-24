@@ -12,7 +12,17 @@ export function getApiBase() {
     if (apiDomain) {
       return `https://${apiDomain}`;
     }
-    return localStorage.getItem("apiHost") ?? "http://localhost:8787";
+    const override = localStorage.getItem("apiHost");
+    if (override) return override;
+    // openfront v2: a production build served with DOMAIN=localhost is a
+    // self-hosted game (hosting/start-openfront.ps1) that players reach from
+    // other machines, where localhost:8787 is their own computer. Ask the
+    // page's own server instead; it answers every API path "not found"
+    // (Master.ts, /_localapi), so the server list falls back to this server.
+    if (process.env.GAME_ENV === "prod") {
+      return `${window.location.origin}/_localapi`;
+    }
+    return "http://localhost:8787";
   }
 
   return `https://api.${domainname}`;

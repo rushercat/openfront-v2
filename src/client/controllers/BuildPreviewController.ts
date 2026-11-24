@@ -41,6 +41,7 @@ import type { GhostPreviewData, RangeWarning } from "../render/types";
 import { TransformHandler } from "../TransformHandler";
 import {
   BuildUnitIntentEvent,
+  paradropTroops,
   SendUpgradeStructureIntentEvent,
 } from "../Transport";
 import { UIState } from "../UIState";
@@ -496,6 +497,7 @@ export class BuildPreviewController implements Controller {
       this.removeGhostStructure();
       return true;
     }
+    this.autoMine();
     const target = this.uiState.ghostStructure;
     const ghostType = target ?? this.ghostUnit?.buildableUnit.type;
     if (
@@ -525,6 +527,27 @@ export class BuildPreviewController implements Controller {
       this.createGhostStructure(target);
     }
     return false;
+  }
+
+  /**
+   * openfront v2: one mine button for both mines. While a mine is being
+   * placed, it becomes a land mine over land and a sea mine over water,
+   * whichever the player picked (as long as the other one is enabled).
+   */
+  private autoMine(): void {
+    const current = this.uiState.ghostStructure;
+    if (current !== UnitType.LandMine && current !== UnitType.SeaMine) return;
+    const tile =
+      this.touchPlacementMode && this.touchPreviewTile !== null
+        ? this.touchPreviewTile
+        : this.getHoveredTile();
+    if (tile === undefined || this.game.isImpassable(tile)) return;
+    const wanted = this.game.isLand(tile)
+      ? UnitType.LandMine
+      : UnitType.SeaMine;
+    if (wanted === current) return;
+    if (this.game.config().isUnitDisabled(wanted)) return;
+    this.uiState.ghostStructure = wanted;
   }
 
   private checkRangeWarning(tileRef: TileRef | undefined): RangeWarning {
@@ -871,6 +894,42 @@ export class BuildPreviewController implements Controller {
         return this.game.config().trainStationMaxRange();
       case UnitType.DefensePost:
         return this.game.config().defensePostRange();
+      case UnitType.AADefense:
+        return this.game.config().aaDefenseRange();
+      // Where the aircraft will look for something to bomb or shoot.
+      case UnitType.Bomber:
+        return this.game.config().bomberTargetingRange();
+      case UnitType.FighterJet:
+        return this.game.config().aircraftPatrolRange(UnitType.FighterJet);
+      // How far its aircraft may operate.
+      case UnitType.Airfield:
+        return this.game
+          .config()
+          .airfieldRange(this.resolveGhostRangeLevel(u) ?? 1);
+      // The tanks it repairs.
+      case UnitType.RailDepot:
+        return this.game.config().railDepotRepairRange();
+      case UnitType.Tank:
+        return this.game.config().tankRange();
+      case UnitType.LandMine:
+        return this.game.config().mineMinDistance();
+      // Everything in this circle sinks when it goes off.
+      case UnitType.SeaMine:
+        return this.game.config().seaMineBlastRadius();
+      // The structures it mends (stacked stations reach a little further).
+      case UnitType.RepairStation:
+        return this.game
+          .config()
+          .repairStationRange(this.resolveGhostRangeLevel(u) ?? 1);
+      // Where its aircraft may operate.
+      case UnitType.AircraftCarrier:
+        return this.game.config().carrierAirRange();
+      // Everything in this circle is hit.
+      case UnitType.CruiseMissile:
+        return this.game.config().cruiseMissileBlastRadius();
+      // The land it defends like a Defense Post.
+      case UnitType.Capital:
+        return this.game.config().capitalDefenseRange();
       default:
         return 0;
     }
@@ -1010,11 +1069,11 @@ export class BuildPreviewController implements Controller {
     e: MouseUpEvent,
     endsPlacement = false,
   ): void {
+    this.mousePos.x = e.x;
+    this.mousePos.y = e.y;
     this.syncGhostState();
     if (!this.ghostUnit) return;
     const ghostType = this.ghostUnit.buildableUnit.type;
-    this.mousePos.x = e.x;
-    this.mousePos.y = e.y;
     const position = this.transformHandler.screenToWorldCoordinates(e.x, e.y);
     // A release just outside the map has no tile to validate or build on.
     if (!this.game.isValidCoord(position.x, position.y)) {
@@ -1211,6 +1270,11 @@ export class BuildPreviewController implements Controller {
           targetTile,
           rocketDirectionUp,
           isNuke ? this.uiState.upgradeMultiplier || 1 : undefined,
+          paradropTroops(
+            unitType,
+            () => this.game.myPlayer()?.troops(),
+            this.uiState.attackRatio,
+          ),
         ),
       );
       if (endsPlacement || !shouldPreserveGhostAfterBuild(unitType)) {
@@ -1462,7 +1526,13 @@ export class BuildPreviewController implements Controller {
   private resolveGhostRangeLevel(
     buildableUnit: BuildableUnit,
   ): number | undefined {
-    if (buildableUnit.type !== UnitType.SAMLauncher) return undefined;
+    if (
+      buildableUnit.type !== UnitType.SAMLauncher &&
+      buildableUnit.type !== UnitType.Airfield &&
+      buildableUnit.type !== UnitType.RepairStation
+    ) {
+      return undefined;
+    }
     if (buildableUnit.canUpgrade !== false) {
       const existing = this.game.unit(buildableUnit.canUpgrade);
       if (existing) {

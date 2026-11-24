@@ -36,6 +36,7 @@ import {
   type DesktopDisplaySnapshot,
 } from "./DesktopDisplay";
 import { isDesktopShell } from "./DesktopShell";
+import { MAX_FPS_OPTIONS } from "./FramePacer";
 import { KeyboardLayoutController } from "./KeyboardLayout";
 import { pushMapLayerState } from "./MapLayerSettings";
 import { KEYBOARD_DETECTED_EVENT, Platform } from "./Platform";
@@ -612,6 +613,12 @@ export class UserSettingModal extends BaseModal {
   private togglePerformanceOverlay() {
     this.userSettings.togglePerformanceOverlay();
   }
+
+  private handleMaxFpsChange = (e: CustomEvent<{ value: unknown }>) => {
+    const value = Number(e.detail?.value);
+    if (!Number.isFinite(value)) return;
+    this.userSettings.setMaxFps(value);
+  };
 
   private toggleMapLayers() {
     this.userSettings.toggleMapLayers();
@@ -1481,6 +1488,146 @@ export class UserSettingModal extends BaseModal {
       ></setting-keybind>
 
       <setting-keybind
+        action="buildFighterJet"
+        label=${translateText("user_setting.build_fighter_jet")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildFighterJet}
+        .value=${this.getKeyValue("buildFighterJet")}
+        .display=${this.getKeyChar("buildFighterJet")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildBomber"
+        label=${translateText("user_setting.build_bomber")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildBomber}
+        .value=${this.getKeyValue("buildBomber")}
+        .display=${this.getKeyChar("buildBomber")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildAADefense"
+        label=${translateText("user_setting.build_aa_defense")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildAADefense}
+        .value=${this.getKeyValue("buildAADefense")}
+        .display=${this.getKeyChar("buildAADefense")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildAirfield"
+        label=${translateText("user_setting.build_airfield")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildAirfield}
+        .value=${this.getKeyValue("buildAirfield")}
+        .display=${this.getKeyChar("buildAirfield")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildRailDepot"
+        label=${translateText("user_setting.build_rail_depot")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildRailDepot}
+        .value=${this.getKeyValue("buildRailDepot")}
+        .display=${this.getKeyChar("buildRailDepot")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildTank"
+        label=${translateText("user_setting.build_tank")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildTank}
+        .value=${this.getKeyValue("buildTank")}
+        .display=${this.getKeyChar("buildTank")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildNuclearSubmarine"
+        label=${translateText("user_setting.build_nuclear_submarine")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildNuclearSubmarine}
+        .value=${this.getKeyValue("buildNuclearSubmarine")}
+        .display=${this.getKeyChar("buildNuclearSubmarine")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildLandMine"
+        label=${translateText("user_setting.build_land_mine")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildLandMine}
+        .value=${this.getKeyValue("buildLandMine")}
+        .display=${this.getKeyChar("buildLandMine")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildSeaMine"
+        label=${translateText("user_setting.build_sea_mine")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildSeaMine}
+        .value=${this.getKeyValue("buildSeaMine")}
+        .display=${this.getKeyChar("buildSeaMine")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildRepairStation"
+        label=${translateText("user_setting.build_repair_station")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildRepairStation}
+        .value=${this.getKeyValue("buildRepairStation")}
+        .display=${this.getKeyChar("buildRepairStation")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildAircraftCarrier"
+        label=${translateText("user_setting.build_aircraft_carrier")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildAircraftCarrier}
+        .value=${this.getKeyValue("buildAircraftCarrier")}
+        .display=${this.getKeyChar("buildAircraftCarrier")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildCruiseMissile"
+        label=${translateText("user_setting.build_cruise_missile")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildCruiseMissile}
+        .value=${this.getKeyValue("buildCruiseMissile")}
+        .display=${this.getKeyChar("buildCruiseMissile")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildTransportPlane"
+        label=${translateText("user_setting.build_transport_plane")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildTransportPlane}
+        .value=${this.getKeyValue("buildTransportPlane")}
+        .display=${this.getKeyChar("buildTransportPlane")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="buildCapital"
+        label=${translateText("user_setting.build_capital")}
+        description=${translateText("user_setting.build_hotkey_desc")}
+        defaultKey=${this.defaultKeybinds.buildCapital}
+        .value=${this.getKeyValue("buildCapital")}
+        .display=${this.getKeyChar("buildCapital")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
         action="buildAtomBomb"
         label=${translateText("user_setting.build_atom_bomb")}
         description=${translateText("user_setting.build_hotkey_desc")}
@@ -1715,6 +1862,16 @@ export class UserSettingModal extends BaseModal {
         .defaultKey=${this.defaultKeybinds.selectAllWarships}
         .value=${this.getKeyValue("selectAllWarships")}
         .display=${this.getKeyChar("selectAllWarships")}
+        @change=${this.handleKeybindChange}
+      ></setting-keybind>
+
+      <setting-keybind
+        action="surfaceSubmarine"
+        label=${translateText("user_setting.surface_submarine")}
+        description=${translateText("user_setting.surface_submarine_desc")}
+        .defaultKey=${this.defaultKeybinds.surfaceSubmarine}
+        .value=${this.getKeyValue("surfaceSubmarine")}
+        .display=${this.getKeyChar("surfaceSubmarine")}
         @change=${this.handleKeybindChange}
       ></setting-keybind>
 
@@ -1982,6 +2139,22 @@ export class UserSettingModal extends BaseModal {
         .checked=${this.userSettings.performanceOverlay()}
         @change=${this.togglePerformanceOverlay}
       ></setting-toggle>
+
+      <!-- 🎞️ Frame cap (FramePacer) -->
+      <setting-select
+        id="max-fps-select"
+        label=${translateText("user_setting.max_fps_label")}
+        description=${translateText("user_setting.max_fps_desc")}
+        .value=${String(this.userSettings.maxFps())}
+        .options=${MAX_FPS_OPTIONS.map((fps) => ({
+          value: fps,
+          label:
+            fps === 0
+              ? translateText("user_setting.max_fps_unlimited")
+              : translateText("user_setting.max_fps_option", { fps }),
+        }))}
+        @change=${this.handleMaxFpsChange}
+      ></setting-select>
 
       <!-- 🗺️ Map Layers -->
       <setting-toggle

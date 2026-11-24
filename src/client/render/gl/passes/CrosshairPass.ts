@@ -1,13 +1,20 @@
 /**
- * CrosshairPass — renders a red crosshair at the cursor position during
- * warship or MIRV placement (ghost preview).
+ * CrosshairPass — renders a red crosshair at the cursor position while
+ * placing a unit that is aimed at a tile (ships, tanks, aircraft, MIRV).
  *
  * Screen-space quad with a crosshair SDF in the fragment shader.
  * Darker red when placement is invalid.
  */
 
 import type { GhostPreviewData } from "../../types";
-import { UT_MIRV, UT_WARSHIP } from "../../types";
+import {
+  AIRCRAFT_TYPES,
+  UT_AIRCRAFT_CARRIER,
+  UT_MIRV,
+  UT_NUCLEAR_SUBMARINE,
+  UT_TANK,
+  UT_WARSHIP,
+} from "../../types";
 import { createProgram } from "../utils/GlUtils";
 
 import fragSrc from "../shaders/crosshair/crosshair.frag.glsl?raw";
@@ -16,6 +23,20 @@ import vertSrc from "../shaders/crosshair/crosshair.vert.glsl?raw";
 import { assetUrl } from "@openfront/shared/AssetUrls";
 
 const statusAtlasUrl = assetUrl("atlases/status-atlas.png");
+
+/**
+ * Units placed by aiming at a tile rather than as a structure: they have no
+ * structure ghost, so without the crosshair their placement shows nothing
+ * at all (not even whether they can be built there).
+ */
+const CROSSHAIR_TYPES: ReadonlySet<string> = new Set([
+  UT_WARSHIP,
+  UT_MIRV,
+  UT_AIRCRAFT_CARRIER,
+  UT_NUCLEAR_SUBMARINE,
+  UT_TANK,
+  ...AIRCRAFT_TYPES,
+]);
 
 /** Half-size of the crosshair quad in screen pixels. */
 const CROSSHAIR_PX = 20;
@@ -98,7 +119,7 @@ export class CrosshairPass {
   }
 
   updateGhostPreview(data: GhostPreviewData | null): void {
-    if (data && (data.ghostType === UT_WARSHIP || data.ghostType === UT_MIRV)) {
+    if (data && CROSSHAIR_TYPES.has(data.ghostType)) {
       this.active = true;
       this.centerX = data.tileX;
       this.centerY = data.tileY;

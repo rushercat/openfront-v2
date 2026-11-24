@@ -41,8 +41,20 @@ export class UniversalPathFinding {
 // Single-threaded worker + stamp-based scratch invalidation makes sharing safe.
 const _waterChainCache = new WeakMap<
   Game,
-  { version: number; chain: PathFinder<TileRef>; memo: WaterPathMemo }
+  {
+    version: number;
+    chain: PathFinder<TileRef>;
+    memo: WaterPathMemo;
+    planningMemo: WaterPathMemo;
+  }
 >();
+
+/**
+ * Budget of the AI's own water-path memo (PathFinding.WaterPlanning). Kept
+ * apart from the trade ships' memo so the AI's many one-off queries can't
+ * evict the port-to-port paths that memo exists for.
+ */
+const PLANNING_MEMO_MAX_BYTES = 4_000_000;
 
 function buildWaterChain(game: Game): PathFinder<TileRef> {
   const hpa = game.miniWaterHPA();
@@ -141,23 +153,32 @@ export class WaterPathMemo implements PathFinder<TileRef> {
  * @param memoized - answer through the per-game WaterPathMemo. Opt-in for the
  *   callers whose queries repeat (trade ships: port tile to port tile); a warship
  *   hunting a moving ship asks a new (from, to) every tick and would only flush it.
+ *   "planning" is the AI's own memo (PathFinding.WaterPlanning).
  */
-function sharedWaterChain(game: Game, memoized = false): PathFinder<TileRef> {
+function sharedWaterChain(
+  game: Game,
+  memoized: boolean | "planning" = false,
+): PathFinder<TileRef> {
   const version = game.waterGraphVersion();
   let cached = _waterChainCache.get(game);
   if (!cached || cached.version !== version) {
     const chain = buildWaterChain(game);
+    const numTiles = game.map().width() * game.map().height();
+    const waterVersion = () => game.map().waterVersion();
     cached = {
       version,
       chain,
-      memo: new WaterPathMemo(
+      memo: new WaterPathMemo(chain, numTiles, waterVersion),
+      planningMemo: new WaterPathMemo(
         chain,
-        game.map().width() * game.map().height(),
-        () => game.map().waterVersion(),
+        numTiles,
+        waterVersion,
+        PLANNING_MEMO_MAX_BYTES,
       ),
     };
     _waterChainCache.set(game, cached);
   }
+  if (memoized === "planning") return cached.planningMemo;
   return memoized ? cached.memo : cached.chain;
 }
 
@@ -168,18 +189,30 @@ function sharedWaterChain(game: Game, memoized = false): PathFinder<TileRef> {
 // rail adapter reads the minimap live and caches only its dimensions, and
 // water changes edit the minimap in place. Stamp-based scratch invalidation
 // and the single-threaded worker make sharing safe, as for the water chain.
-const _railChainCache = new WeakMap<Game, PathFinder<TileRef>>();
+const _railChainCache = new WeakMap<
+  Game,
+  { chain: PathFinder<TileRef>; rail: AStarRail }
+>();
 
-function sharedRailChain(game: Game): PathFinder<TileRef> {
-  let chain = _railChainCache.get(game);
-  if (chain === undefined) {
+function railChain(game: Game): {
+  chain: PathFinder<TileRef>;
+  rail: AStarRail;
+} {
+  let cached = _railChainCache.get(game);
+  if (cached === undefined) {
     const miniMap = game.miniMap();
-    chain = PathFinderBuilder.create(new AStarRail(miniMap))
+    const rail = new AStarRail(miniMap);
+    const chain = PathFinderBuilder.create(rail)
       .wrap((pf) => new MiniMapTransformer(pf, game.map(), miniMap))
       .build();
-    _railChainCache.set(game, chain);
+    cached = { chain, rail };
+    _railChainCache.set(game, cached);
   }
-  return chain;
+  return cached;
+}
+
+function sharedRailChain(game: Game): PathFinder<TileRef> {
+  return railChain(game).chain;
 }
 
 /**
@@ -193,10 +226,32 @@ export class PathFinding {
     );
   }
 
+  /**
+   * Water(), answered through a memo: for the AI's route planning, which asks
+   * the same launch → landing crossing again on later decisions while the
+   * coasts stand still. The same answers as Water() (the memo only stores
+   * them, and forgets them on every water change).
+   */
+  static WaterPlanning(game: Game): SteppingPathFinder<TileRef> {
+    return new PathFinderStepper(
+      sharedWaterChain(game, "planning"),
+      tileStepperConfig(game),
+    );
+  }
+
   static WaterSimple(game: Game): SteppingPathFinder<TileRef> {
     // Kept for backwards compatibility; shared chain auto-selects simple vs
     // hierarchical based on graph availability.
     return PathFinding.Water(game);
+  }
+
+  /**
+   * Does the rail search's one-off setup now (its map of regions, AStarRail:
+   * tens of ms on a world map), so the first factory of the game doesn't pay
+   * it in the middle of a tick. Changes no answer.
+   */
+  static prepareRail(game: Game): void {
+    railChain(game).rail.prepare();
   }
 
   static Rail(game: Game): SteppingPathFinder<TileRef> {

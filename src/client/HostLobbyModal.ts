@@ -1,8 +1,11 @@
 import {
+  CustomGameMap,
   Difficulty,
   GameMapSize,
   GameMapType,
+  GameFeature,
   GameMode,
+  HistoricalScenarioId,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
 import {
@@ -11,8 +14,11 @@ import {
   MAX_BOTS,
   TeamCountConfig,
 } from "@openfront/engine-api/Schemas";
+import type { DraftConfig } from "@openfront/engine-api/Schemas";
 import { DoomsdayClockSpeed } from "@openfront/engine-lib/game/DoomsdayClock";
+import { historicalScenario } from "@openfront/engine-lib/game/HistoricalScenarios";
 import { GameEnv } from "@openfront/shared/configuration/Env";
+import type { CustomMapInfo } from "@openfront/shared/CustomMaps";
 import { EventBus } from "@openfront/shared/EventBus";
 import {
   ClientInfo,
@@ -29,12 +35,13 @@ import {
   showToast,
   translateText,
 } from "../client/Utils";
-import { createLobby, getUserMe, queueLobby, setLobbyListed } from "./Api";
 import "./components/baseComponents/Modal";
-import { BaseModal } from "./components/BaseModal";
+import { createLobby, getUserMe, queueLobby, setLobbyListed } from "./Api";
 import "./components/ConfirmDialog";
-import { CopyButton } from "./components/CopyButton";
+import { BaseModal } from "./components/BaseModal";
+import "./components/DraftSettingsPanel";
 import "./components/GameConfigSettings";
+import { CopyButton } from "./components/CopyButton";
 import "./components/InputCard";
 import "./components/InsufficientCurrencyDialog";
 // The type import below is erased at runtime; keep this to register the dialog.
@@ -48,6 +55,7 @@ import "./components/ToggleInputCard";
 import { inviteFriendsButton } from "./components/ui/InviteFriendsButton";
 import { modalHeader } from "./components/ui/ModalHeader";
 import { fetchCosmetics, InsufficientCurrency } from "./Cosmetics";
+import { ensureCustomMapLoaded, listCustomMaps } from "./CustomMapsApi";
 import { gamePortal } from "./GamePortal";
 import {
   deleteLobbyPreset,
@@ -56,12 +64,18 @@ import {
   saveLobbyPreset,
 } from "./LobbyPresets";
 import { JoinLobbyEvent } from "./Main";
+import "./components/ScenarioAssignmentPanel";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import { UserSettings } from "./UserSettings";
+import {
+  applyComplexity,
+  ComplexityLevel,
+} from "./utilities/ComplexityPresets";
 import {
   getBotsForCompactMap,
   getNationsForCompactMap,
   getRandomMapType,
+  getUpdatedDisabledFeatures,
   getUpdatedDisabledUnits,
   nationsConfigToSlider,
   parseBoundedFloatFromInput,
@@ -127,8 +141,19 @@ export class HostLobbyModal extends BaseModal {
   @state() private lobbyId = "";
   @state() private lobbyUrlSuffix = "";
   @state() private clients: ClientInfo[] = [];
+  // openfront v2: uploaded custom maps, and the historical scenario mode.
+  @state() private customMaps: CustomMapInfo[] | null = null;
+  @state() private customMapsError = false;
+  @state() private selectedCustomMapId: string | null = null;
+  @state() private historicalScenario: HistoricalScenarioId | null = null;
+  /** clientID → scenario nation key, chosen by the host. */
+  @state() private scenarioAssignments: Record<string, string> = {};
+  @state() private scenarioMissions = false;
   @state() private useRandomMap: boolean = false;
   @state() private disabledUnits: UnitType[] = [];
+  @state() private disabledFeatures: GameFeature[] = [];
+  /** The draft mode (GameConfig.draft). */
+  @state() private draftConfig: DraftConfig = { enabled: false };
   @state() private hostCheatsEnabled: boolean = false;
   @state() private hostCheatInfiniteGold: boolean = false;
   @state() private hostCheatInfiniteTroops: boolean = false;
@@ -335,6 +360,12 @@ export class HostLobbyModal extends BaseModal {
   // one-way (the server rejects unlisting), so the Private segment goes away
   // once the lobby is listed.
   private renderVisibilityToggle() {
+    // openfront v2: private matches only, so there is nothing to toggle.
+    return html`${this.renderAutoStartTimer()}`;
+  }
+
+  // Kept for when public matches come back (src/server/PublicMatches.ts).
+  private renderPublicVisibilityToggle() {
     const segment = (labelKey: string, isPublic: boolean) => html`
       <button
         class="px-3 py-1 text-[10px] font-bold uppercase tracking-widest rounded-full transition-all ${
@@ -707,6 +738,13 @@ export class HostLobbyModal extends BaseModal {
                 selected: this.selectedMap,
                 useRandom: this.useRandomMap,
                 randomMapDivider: true,
+                customMaps: this.customMaps,
+                customMapsError: this.customMapsError,
+                selectedCustomMapId: this.selectedCustomMapId,
+              },
+              scenario: {
+                selected: this.historicalScenario,
+                missions: this.scenarioMissions,
               },
               difficulty: {
                 selected: this.selectedDifficulty,
@@ -730,6 +768,8 @@ export class HostLobbyModal extends BaseModal {
                   defaultValue: this.defaultNationCount,
                   labelKey: "game_settings.nations",
                   disabledKey: "common.disabled",
+                  // A scenario plays every one of its nations.
+                  hidden: this.historicalScenario !== null,
                 },
                 toggles: [
                   {
@@ -805,9 +845,14 @@ export class HostLobbyModal extends BaseModal {
               unitTypes: {
                 titleKey: "game_settings.disable_units",
                 disabledUnits: this.disabledUnits,
+                disabledFeatures: this.disabledFeatures,
               },
             }}
             @map-selected=${this.handleConfigMapSelected}
+            @custom-map-selected=${this.handleConfigCustomMapSelected}
+            @custom-maps-refresh=${this.handleConfigCustomMapsRefresh}
+            @scenario-selected=${this.handleConfigScenarioSelected}
+            @scenario-missions-changed=${this.handleScenarioMissions}
             @random-map-selected=${this.handleConfigRandomMapSelected}
             @difficulty-selected=${this.handleConfigDifficultySelected}
             @doomsday-clock-speed-selected=${
@@ -822,8 +867,31 @@ export class HostLobbyModal extends BaseModal {
               this.handleConfigHostCheatToggleChanged
             }
             @unit-toggle-changed=${this.handleConfigUnitToggleChanged}
+            @feature-toggle-changed=${this.handleConfigFeatureToggleChanged}
+            @complexity-selected=${this.handleComplexitySelected}
           ></game-config-settings>
+          <draft-settings-panel
+            .config=${this.draftConfig}
+            @draft-config-changed=${this.handleDraftConfigChanged}
+          ></draft-settings-panel>
 
+          ${
+            this.historicalScenario !== null
+              ? html`<scenario-assignment-panel
+                  class="block mt-10"
+                  .scenarioId=${this.historicalScenario}
+                  .players=${this.clients
+                    .filter((c) => c.spectator !== true)
+                    .map((c) => ({
+                      clientID: c.clientID,
+                      username: c.username,
+                    }))}
+                  .assignments=${this.scenarioAssignments}
+                  .editable=${true}
+                  @scenario-assignment=${this.handleScenarioAssignment}
+                ></scenario-assignment-panel>`
+              : nothing
+          }
           <lobby-player-view
             class="mt-10"
             .gameMode=${this.gameMode}
@@ -929,6 +997,7 @@ export class HostLobbyModal extends BaseModal {
 
   protected onOpen(args?: Record<string, unknown>): void {
     this.lobbyPresets = this.userSettings.getLobbyPresets();
+    void this.loadCustomMaps();
     // Re-armed here (not in onClose's reset) so that once
     // closeWithoutLeaving() disarms it, no close cascade — e.g. another
     // modal's close() navigating via showPage, which force-closes this one —
@@ -1088,6 +1157,9 @@ export class HostLobbyModal extends BaseModal {
     // Reset all transient form state to ensure clean slate
     this.selectedPresetName = "";
     this.selectedMap = GameMapType.World;
+    this.selectedCustomMapId = null;
+    this.historicalScenario = null;
+    this.scenarioAssignments = {};
     this.selectedDifficulty = Difficulty.Easy;
     this.nations = 0;
     this.defaultNationCount = 0;
@@ -1114,6 +1186,8 @@ export class HostLobbyModal extends BaseModal {
     this.compactMap = false;
     this.useRandomMap = false;
     this.disabledUnits = [];
+    this.disabledFeatures = [];
+    this.draftConfig = { enabled: false };
     this.lobbyId = "";
     this.clients = [];
     this.lobbyCreatorClientID = "";
@@ -1149,7 +1223,91 @@ export class HostLobbyModal extends BaseModal {
     this.autoStartAt = null;
   }
 
+  private async loadCustomMaps() {
+    this.customMapsError = false;
+    try {
+      this.customMaps = await listCustomMaps();
+    } catch (e) {
+      console.warn("custom maps: listing failed:", e);
+      this.customMapsError = true;
+    }
+  }
+
+  private handleConfigCustomMapsRefresh = () => {
+    this.customMaps = null;
+    void this.loadCustomMaps();
+  };
+
+  private handleConfigCustomMapSelected = (e: Event) => {
+    const { id } = (e as CustomEvent<{ id: string }>).detail;
+    void this.handleCustomMapSelection(id);
+  };
+
+  /** Plays an uploaded custom map: its nations set the nation count. */
+  private async handleCustomMapSelection(id: string) {
+    this.selectedCustomMapId = id;
+    this.useRandomMap = false;
+    this.historicalScenario = null;
+    try {
+      await ensureCustomMapLoaded(id);
+      if (this.selectedCustomMapId !== id) return;
+      const manifest = await terrainMapFileLoader
+        .getMapData(CustomGameMap)
+        .manifest();
+      this.defaultNationCount = manifest.nations.length;
+      this.nations = manifest.nations.length;
+    } catch (e) {
+      console.warn("custom maps: loading the map failed:", e);
+      showToast(translateText("custom_maps.load_failed"), "red");
+    }
+    void this.putGameConfig();
+  }
+
+  private handleConfigScenarioSelected = (e: Event) => {
+    const { id } = (e as CustomEvent<{ id: HistoricalScenarioId | null }>)
+      .detail;
+    void this.handleScenarioSelection(id);
+  };
+
+  /**
+   * The historical scenario mode: the scenario fixes the map (at normal
+   * size), every nation spawns at its place, and the host assigns players
+   * to nations.
+   */
+  private async handleScenarioSelection(id: HistoricalScenarioId | null) {
+    this.historicalScenario = id;
+    if (id !== null) {
+      this.selectedCustomMapId = null;
+      this.useRandomMap = false;
+      this.selectedMap = historicalScenario(id).map;
+      this.gameMode = GameMode.FFA;
+      this.compactMap = false;
+      this.randomSpawn = false;
+      await this.loadNationCount();
+    }
+    void this.putGameConfig();
+  }
+
+  private handleScenarioMissions = (e: Event) => {
+    this.scenarioMissions = (
+      e as CustomEvent<{ enabled: boolean }>
+    ).detail.enabled;
+    void this.putGameConfig();
+  };
+
+  private handleScenarioAssignment = (e: Event) => {
+    const { clientID, nation } = (
+      e as CustomEvent<{ clientID: string; nation: string | null }>
+    ).detail;
+    const next = { ...this.scenarioAssignments };
+    if (nation === null) delete next[clientID];
+    else next[clientID] = nation;
+    this.scenarioAssignments = next;
+    void this.putGameConfig();
+  };
+
   private async handleSelectRandomMap() {
+    this.selectedCustomMapId = null;
     this.useRandomMap = true;
     this.selectedMap = getRandomMapType();
     await this.loadNationCount();
@@ -1161,6 +1319,7 @@ export class HostLobbyModal extends BaseModal {
   };
 
   private async handleMapSelection(value: GameMapType) {
+    this.selectedCustomMapId = null;
     this.selectedMap = value;
     this.useRandomMap = false;
     await this.loadNationCount();
@@ -1267,6 +1426,37 @@ export class HostLobbyModal extends BaseModal {
       default:
         break;
     }
+  };
+
+  private handleDraftConfigChanged = (e: Event) => {
+    this.draftConfig = (
+      e as CustomEvent<{ config: DraftConfig }>
+    ).detail.config;
+    void this.putGameConfig();
+  };
+
+  private handleConfigFeatureToggleChanged = (e: Event) => {
+    const { feature, checked } = (
+      e as CustomEvent<{ feature: GameFeature; checked: boolean }>
+    ).detail;
+    this.disabledFeatures = getUpdatedDisabledFeatures(
+      this.disabledFeatures,
+      feature,
+      checked,
+    );
+    void this.putGameConfig();
+  };
+
+  private handleComplexitySelected = (e: Event) => {
+    const { level } = (e as CustomEvent<{ level: ComplexityLevel }>).detail;
+    const next = applyComplexity(
+      level,
+      this.disabledUnits,
+      this.disabledFeatures,
+    );
+    this.disabledUnits = next.disabledUnits;
+    this.disabledFeatures = next.disabledFeatures;
+    void this.putGameConfig();
   };
 
   private handleConfigUnitToggleChanged = (e: Event) => {
@@ -1660,6 +1850,7 @@ export class HostLobbyModal extends BaseModal {
 
   private async handleGameModeSelection(value: GameMode) {
     this.gameMode = value;
+    this.historicalScenario = null;
     if (this.gameMode === GameMode.Team) {
       this.donateGold = true;
       this.donateTroops = true;
@@ -1762,6 +1953,7 @@ export class HostLobbyModal extends BaseModal {
       maxTimer: this.maxTimer,
       maxTimerValue: this.maxTimerValue,
       disabledUnits: [...this.disabledUnits],
+      disabledFeatures: [...this.disabledFeatures],
       goldMultiplier: this.goldMultiplier,
       goldMultiplierValue: this.goldMultiplierValue,
       startingGold: this.startingGold,
@@ -1809,6 +2001,9 @@ export class HostLobbyModal extends BaseModal {
     this.maxTimer = config.maxTimer ?? false;
     this.maxTimerValue = config.maxTimerValue;
     this.disabledUnits = config.disabledUnits ? [...config.disabledUnits] : [];
+    this.disabledFeatures = config.disabledFeatures
+      ? [...config.disabledFeatures]
+      : [];
     this.goldMultiplier = config.goldMultiplier ?? false;
     this.goldMultiplierValue = config.goldMultiplierValue;
     this.startingGold = config.startingGold ?? false;
@@ -1934,10 +2129,35 @@ export class HostLobbyModal extends BaseModal {
       new CustomEvent("update-game-config", {
         detail: {
           config: {
-            gameMap: this.selectedMap,
-            gameMapSize: this.compactMap
-              ? GameMapSize.Compact
-              : GameMapSize.Normal,
+            gameMap:
+              this.historicalScenario !== null
+                ? historicalScenario(this.historicalScenario).map
+                : this.selectedCustomMapId !== null
+                  ? CustomGameMap
+                  : this.selectedMap,
+            customMapId:
+              this.historicalScenario === null
+                ? (this.selectedCustomMapId ?? undefined)
+                : undefined,
+            historicalScenario: this.historicalScenario ?? undefined,
+            scenarioAssignments:
+              this.historicalScenario !== null
+                ? Object.entries(this.scenarioAssignments)
+                    .filter(([clientID]) =>
+                      this.clients.some(
+                        (c) => c.clientID === clientID && c.spectator !== true,
+                      ),
+                    )
+                    .map(([clientID, nation]) => ({ clientID, nation }))
+                : undefined,
+            scenarioMissions:
+              this.historicalScenario !== null && this.scenarioMissions
+                ? true
+                : undefined,
+            gameMapSize:
+              this.compactMap && this.historicalScenario === null
+                ? GameMapSize.Compact
+                : GameMapSize.Normal,
             difficulty: this.selectedDifficulty,
             bots: this.bots,
             infiniteGold: this.infiniteGold,
@@ -1945,9 +2165,13 @@ export class HostLobbyModal extends BaseModal {
             infiniteTroops: this.infiniteTroops,
             donateTroops: this.donateTroops,
             instantBuild: this.instantBuild,
-            randomSpawn: this.randomSpawn,
-            gameMode: this.gameMode,
+            randomSpawn: this.historicalScenario === null && this.randomSpawn,
+            gameMode:
+              this.historicalScenario === null ? this.gameMode : GameMode.FFA,
             disabledUnits: this.disabledUnits,
+            disabledFeatures: this.disabledFeatures,
+            // Always sent ({enabled:false} when off), like doomsdayClock.
+            draft: this.draftConfig,
             spawnImmunityDuration: this.spawnImmunity
               ? spawnImmunityTicks
               : null,

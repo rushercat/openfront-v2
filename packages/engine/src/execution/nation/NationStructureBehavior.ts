@@ -26,7 +26,11 @@ import { ConstructionExecution } from "../ConstructionExecution";
 import { UpgradeStructureExecution } from "../UpgradeStructureExecution";
 import { isMirvWorthSavingFor } from "./NationMIRVBehavior";
 import { NationStructurePlacement } from "./NationStructurePlacement";
-import { hasHighStartingGold, isSaveUpWithinReach } from "./NationUtils";
+import {
+  hasHighStartingGold,
+  isSaveUpWithinReach,
+  aiUnitDisabled,
+} from "./NationUtils";
 
 /**
  * Configuration for how many structures of each type a nation should build
@@ -46,6 +50,20 @@ const SAM_RATIO_BY_DIFFICULTY: Record<Difficulty, number> = {
   [Difficulty.Hard]: 0.25,
   [Difficulty.Impossible]: 0.3,
 };
+
+/** AA Defense ratio per city, keyed by difficulty */
+const AA_DEFENSE_RATIO_BY_DIFFICULTY: Record<Difficulty, number> = {
+  [Difficulty.Easy]: 0.1,
+  [Difficulty.Medium]: 0.2,
+  [Difficulty.Hard]: 0.25,
+  [Difficulty.Impossible]: 0.3,
+};
+
+/** Maximum number of airfields a nation will build (it upgrades them after that) */
+const MAX_AIRFIELDS = 2;
+
+/** Ratio per city used for the first airfield so nations get an air force with their fourth city */
+const FIRST_AIRFIELD_RATIO = 0.25;
 
 /** Port ratio per city in team games (not on Easy), where teammates are safe trade partners */
 const TEAM_PORT_RATIO = 1;
@@ -77,6 +95,14 @@ function getStructureRatios(
     [UnitType.MissileSilo]: {
       ratioPerCity: 0.2,
       perceivedCostIncreasePerOwned: 1,
+    },
+    [UnitType.Airfield]: {
+      ratioPerCity: 0.2,
+      perceivedCostIncreasePerOwned: 1,
+    },
+    [UnitType.AADefense]: {
+      ratioPerCity: AA_DEFENSE_RATIO_BY_DIFFICULTY[difficulty],
+      perceivedCostIncreasePerOwned: 0.3,
     },
   };
 }
@@ -208,6 +234,38 @@ const PROACTIVE_DEFENSE_POST_HOSTILE_TROOP_RATIO: Partial<
   [Difficulty.Impossible]: 0.5,
 };
 
+/**
+ * Hard & Impossible stack guard: structure levels (STACK_TYPE_WEIGHT
+ * weighted) one SAM level is worth guarding. Lower guards more.
+ */
+const STACK_LEVELS_PER_SAM_LEVEL: Partial<Record<Difficulty, number>> = {
+  [Difficulty.Hard]: 8,
+  [Difficulty.Impossible]: 6,
+};
+/** How much a level of each structure weighs in a stack: ports and silos are what get nuked. */
+const STACK_TYPE_WEIGHT: Partial<Record<UnitType, number>> = {
+  [UnitType.City]: 1,
+  [UnitType.Factory]: 1,
+  [UnitType.Port]: 1.5,
+  [UnitType.MissileSilo]: 1.5,
+};
+/** The stack guard stacks a SAM up to this level. */
+const STACK_GUARD_MAX_SAM_LEVEL = 6;
+/** Rings (shares of a fresh SAM's range) around a stack searched for a SAM spot, nearest last. */
+const SAM_RING_SHARES = [0.6, 0.4, 0.2];
+
+/** A structure below this share of its health wants a Repair Station */
+const REPAIR_DAMAGE_THRESHOLD = 0.8;
+/** Highest level a nation stacks a Repair Station to */
+const REPAIR_STATION_MAX_LEVEL = 3;
+/** Repair Stations a nation builds at most: this many plus REPAIR_STATIONS_PER_CITY per city */
+const REPAIR_STATIONS_BASE = 1;
+const REPAIR_STATIONS_PER_CITY = 0.15;
+/** A new Repair Station keeps at least this share of a station's reach from the others */
+const REPAIR_STATION_MIN_SPACING = 0.6;
+/** Damaged structures in one station's reach worth stacking it for */
+const REPAIR_STACK_MIN_DAMAGED = 3;
+
 /** Random tiles tried when looking for a defense post spot */
 const DEFENSE_POST_SAMPLE_ATTEMPTS = 150;
 
@@ -271,7 +329,7 @@ export class NationStructureBehavior {
     // are never built as the very first structure.
     if (
       this.placementsCount > 0 &&
-      !this.game.config().isUnitDisabled(UnitType.DefensePost)
+      !aiUnitDisabled(this.game, this.player, UnitType.DefensePost)
     ) {
       if (this.tryBuildDefensePost()) {
         return true;
@@ -354,13 +412,143 @@ export class NationStructureBehavior {
    * least as strong as itself, Impossible also weaker ones. One post per
    * threatening neighbor.
    */
+  /**
+   * Damaged structures no longer heal on their own. Once a structure is down
+   * to less than 80% of its health with no Repair Station of ours reaching
+   * it, the nation builds (or stacks) one there.
+   */
+  private maybeBuildRepairStation(): boolean {
+    const config = this.game.config();
+    if (aiUnitDisabled(this.game, this.player, UnitType.RepairStation))
+      return false;
+    const allStations = this.player.units(UnitType.RepairStation);
+    // One on its way is enough: wait for it before buying more.
+    if (allStations.some((s) => s.isUnderConstruction())) return false;
+    const reaches = (s: Unit, tile: TileRef, level: number) => {
+      const range = config.repairStationRange(level);
+      return this.game.euclideanDistSquared(s.tile(), tile) <= range * range;
+    };
+    let target: Unit | null = null;
+    for (const unit of this.player.units(Structures.types)) {
+      if (
+        unit.type() === UnitType.RepairStation ||
+        unit.isUnderConstruction() ||
+        !unit.hasHealth() ||
+        unit.health() >= unit.maxHealth() * REPAIR_DAMAGE_THRESHOLD
+      ) {
+        continue;
+      }
+      if (!allStations.some((s) => reaches(s, unit.tile(), s.level()))) {
+        target = unit;
+        break;
+      }
+    }
+    if (target === null) return this.maybeStackRepairStation(allStations);
+    if (this.player.gold() < this.getPerceivedCost(UnitType.RepairStation)) {
+      return false;
+    }
+
+    // A station that would reach it with one more level: stack that one.
+    // Never past REPAIR_STATION_MAX_LEVEL; a level adds only a few tiles of
+    // range, so stacking a station that can't reach it never helps (that is
+    // how a nation once ended up with a level 126 station).
+    for (const s of allStations) {
+      if (
+        s.level() < REPAIR_STATION_MAX_LEVEL &&
+        reaches(s, target.tile(), s.level() + 1) &&
+        this.player.canUpgradeUnit(s)
+      ) {
+        this.game.addExecution(
+          new UpgradeStructureExecution(this.player, s.id(), 1),
+        );
+        return true;
+      }
+    }
+
+    // Otherwise a new one next to the damage, up to a few per city.
+    const maxStations =
+      REPAIR_STATIONS_BASE +
+      Math.floor(this.cityCount() * REPAIR_STATIONS_PER_CITY);
+    if (allStations.length >= maxStations) return false;
+    const tile = this.placement.spawnTile(UnitType.RepairStation);
+    const range = config.repairStationRange(1);
+    if (
+      tile === null ||
+      // It must reach the damage it is built for...
+      this.game.euclideanDistSquared(tile, target.tile()) > range * range ||
+      // ...and not sit right next to another station (stations don't add
+      // up; some overlap is fine when the damage lies just out of reach).
+      allStations.some(
+        (s) =>
+          this.game.euclideanDistSquared(tile, s.tile()) <
+          (range * REPAIR_STATION_MIN_SPACING) ** 2,
+      ) ||
+      this.player.canBuild(UnitType.RepairStation, tile) === false
+    ) {
+      return false;
+    }
+    this.game.addExecution(
+      new ConstructionExecution(this.player, UnitType.RepairStation, tile),
+    );
+    return true;
+  }
+
+  /**
+   * Every damaged structure is in reach of a station: stack the station
+   * that mends the most damage, so it heals faster (a higher level heals
+   * more per tick). Only with gold to spare, and up to
+   * REPAIR_STATION_MAX_LEVEL.
+   */
+  private maybeStackRepairStation(stations: Unit[]): boolean {
+    const config = this.game.config();
+    const damaged = this.player
+      .units(Structures.types)
+      .filter(
+        (u) =>
+          u.type() !== UnitType.RepairStation &&
+          !u.isUnderConstruction() &&
+          u.hasHealth() &&
+          u.health() < u.maxHealth() * REPAIR_DAMAGE_THRESHOLD,
+      );
+    if (damaged.length < REPAIR_STACK_MIN_DAMAGED) return false;
+    let best: Unit | null = null;
+    let bestCount = 0;
+    for (const s of stations) {
+      if (s.isUnderConstruction() || s.level() >= REPAIR_STATION_MAX_LEVEL) {
+        continue;
+      }
+      const r = config.repairStationRange(s.level());
+      const count = damaged.filter(
+        (u) => this.game.euclideanDistSquared(s.tile(), u.tile()) <= r * r,
+      ).length;
+      if (count > bestCount) {
+        bestCount = count;
+        best = s;
+      }
+    }
+    if (
+      best === null ||
+      bestCount < REPAIR_STACK_MIN_DAMAGED ||
+      // Stacking speeds things up, it isn't urgent: twice the price in hand.
+      this.player.gold() < this.getPerceivedCost(UnitType.RepairStation) * 2n ||
+      !this.player.canUpgradeUnit(best)
+    ) {
+      return false;
+    }
+    this.game.addExecution(
+      new UpgradeStructureExecution(this.player, best.id(), 1),
+    );
+    return true;
+  }
+
   private maybeBuildProactiveDefensePost(): boolean {
     const config = this.game.config();
     const { difficulty } = config.gameConfig();
     const hostileTroopRatio =
       PROACTIVE_DEFENSE_POST_HOSTILE_TROOP_RATIO[difficulty];
     if (hostileTroopRatio === undefined) return false;
-    if (config.isUnitDisabled(UnitType.DefensePost)) return false;
+    if (aiUnitDisabled(this.game, this.player, UnitType.DefensePost))
+      return false;
     const cityCount = this.cityCount();
     if (cityCount < PROACTIVE_DEFENSE_POST_MIN_CITIES) return false;
 
@@ -576,7 +764,7 @@ export class NationStructureBehavior {
   // 15s ON / 15s OFF, alternating, to allow NationNukeBehavior to spend the gold.
   // Not while the gold covers the target twice, as bulk upgrades leave the target for nukes.
   private isInPostSaveUpBlockedPhase(): boolean {
-    if (this.game.config().isUnitDisabled(UnitType.MissileSilo)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.MissileSilo)) {
       return false;
     }
     const saveUpTarget = this.getSaveUpTarget();
@@ -599,11 +787,19 @@ export class NationStructureBehavior {
   private doHandleStructures(): boolean {
     this.placement.startRound();
     const config = this.game.config();
-    const citiesDisabled = config.isUnitDisabled(UnitType.City);
+    const citiesDisabled = aiUnitDisabled(
+      this.game,
+      this.player,
+      UnitType.City,
+    );
     const cityCount = this.cityCount();
     const hasCoastalTiles = this.placement.hasCoastalTiles();
 
-    const missileSilosEnabled = !config.isUnitDisabled(UnitType.MissileSilo);
+    const missileSilosEnabled = !aiUnitDisabled(
+      this.game,
+      this.player,
+      UnitType.MissileSilo,
+    );
 
     // High-starting-gold Hard/Impossible nations build a SAM first so their
     // next structures get SAM coverage and aren't clustered under the same nuke target.
@@ -612,9 +808,9 @@ export class NationStructureBehavior {
       this.placementsCount === 0 &&
       (difficulty === Difficulty.Hard ||
         difficulty === Difficulty.Impossible) &&
-      !config.isUnitDisabled(UnitType.AtomBomb) &&
+      !aiUnitDisabled(this.game, this.player, UnitType.AtomBomb) &&
       missileSilosEnabled &&
-      !config.isUnitDisabled(UnitType.SAMLauncher) &&
+      !aiUnitDisabled(this.game, this.player, UnitType.SAMLauncher) &&
       this.hasHighStartingGold() &&
       this.maybeSpawnStructure(UnitType.SAMLauncher)
     ) {
@@ -634,10 +830,11 @@ export class NationStructureBehavior {
         (difficulty !== Difficulty.Easy && this.startsInTeamSpawnArea()))
     ) {
       const preferredFirst =
-        hasCoastalTiles && !config.isUnitDisabled(UnitType.Port)
+        hasCoastalTiles &&
+        !aiUnitDisabled(this.game, this.player, UnitType.Port)
           ? UnitType.Port
           : UnitType.Factory;
-      if (config.isUnitDisabled(preferredFirst)) {
+      if (aiUnitDisabled(this.game, this.player, preferredFirst)) {
         this.builtCrowdedMapFirstStructure = true;
       } else if (this.maybeSpawnStructure(preferredFirst)) {
         this.builtCrowdedMapFirstStructure = true;
@@ -649,13 +846,28 @@ export class NationStructureBehavior {
       return true;
     }
 
+    if (this.maybeBuildRepairStation()) {
+      return true;
+    }
+
+    if (this.maybeGuardStacks()) {
+      return true;
+    }
+
     // Build order for non-city structures (priority order)
     const buildOrder: UnitType[] = [
       UnitType.Port,
       UnitType.Factory,
       UnitType.SAMLauncher,
       UnitType.MissileSilo,
+      UnitType.Airfield,
+      UnitType.AADefense,
     ];
+
+    // Airfields and AA Defenses are about aircraft only.
+    const aircraftEnabled =
+      !aiUnitDisabled(this.game, this.player, UnitType.FighterJet) ||
+      !aiUnitDisabled(this.game, this.player, UnitType.Bomber);
 
     const nukesEnabled =
       !config.isUnitDisabled(UnitType.AtomBomb) ||
@@ -664,7 +876,7 @@ export class NationStructureBehavior {
 
     for (const structureType of buildOrder) {
       // Skip disabled structure types
-      if (config.isUnitDisabled(structureType)) {
+      if (aiUnitDisabled(this.game, this.player, structureType)) {
         continue;
       }
 
@@ -687,8 +899,20 @@ export class NationStructureBehavior {
         continue;
       }
 
+      // Skip airfields and AA defenses if all aircraft are disabled
       if (
-        this.shouldBuildStructure(structureType, cityCount, hasCoastalTiles)
+        !aircraftEnabled &&
+        (structureType === UnitType.Airfield ||
+          structureType === UnitType.AADefense)
+      ) {
+        continue;
+      }
+
+      if (
+        this.shouldBuildStructure(structureType, cityCount, hasCoastalTiles) &&
+        // AA Defenses only once someone else can fly: until then they are
+        // money thrown away.
+        (structureType !== UnitType.AADefense || this.othersHaveAirBases())
       ) {
         if (this.maybeSpawnStructure(structureType)) {
           return true;
@@ -703,9 +927,196 @@ export class NationStructureBehavior {
     return false;
   }
 
+  /**
+   * Hard & Impossible guard their stacks against nukes before anyone fires,
+   * like good players: SAMs take long to build and upgrade. Once some other
+   * player could nuke (a silo or a nuclear submarine), every stack of
+   * structure levels (ports and silos count extra) wants enough SAM levels
+   * over it, its own and its teammates' SAMs together:
+   * 1. a stack nobody's SAM covers gets one (placed by samLauncherValue,
+   *    which also weighs nearby teammates' structures);
+   * 2. the SAM of ours with the biggest shortfall is stacked a level.
+   * In team games the stacks of teammates next to us count too, so the
+   * team covers its clusters together instead of each on its own.
+   */
+  private maybeGuardStacks(): boolean {
+    const config = this.game.config();
+    const { difficulty } = config.gameConfig();
+    const levelsPerSam = STACK_LEVELS_PER_SAM_LEVEL[difficulty];
+    if (levelsPerSam === undefined) return false;
+    if (
+      aiUnitDisabled(this.game, this.player, UnitType.SAMLauncher) ||
+      !this.othersCanNuke() ||
+      this.player
+        .units(UnitType.SAMLauncher)
+        .some((s) => s.isUnderConstruction())
+    ) {
+      return false;
+    }
+    if (this.player.gold() < this.getPerceivedCost(UnitType.SAMLauncher)) {
+      return false;
+    }
+
+    const game = this.game;
+    const team = this.teammates();
+    const friends = [this.player, ...team];
+    const stacks: { tile: TileRef; weight: number; own: boolean }[] = [];
+    for (const p of friends) {
+      for (const unit of p.units(SAM_PROTECTED_TYPES)) {
+        if (unit.isUnderConstruction()) continue;
+        stacks.push({
+          tile: unit.tile(),
+          weight: unit.level() * (STACK_TYPE_WEIGHT[unit.type()] ?? 1),
+          own: p === this.player,
+        });
+      }
+    }
+    const sams = friends.flatMap((p) => p.units(UnitType.SAMLauncher));
+    const reaches = (sam: Unit, tile: TileRef) =>
+      game.euclideanDistSquared(sam.tile(), tile) <=
+      config.samRange(sam.level()) ** 2;
+
+    // 1. A heavy stack of ours (or a teammate's we border) nobody covers
+    const reach = config.defaultSamRange();
+    for (const stack of stacks) {
+      if (stack.weight < levelsPerSam / 2) continue;
+      if (sams.some((sam) => reaches(sam, stack.tile))) continue;
+      if (
+        !stack.own &&
+        !this.player
+          .units(SAM_PROTECTED_TYPES)
+          .some(
+            (u) =>
+              game.euclideanDistSquared(u.tile(), stack.tile) <= reach * reach,
+          )
+      ) {
+        continue;
+      }
+      // A new SAM that really covers it, never an upgrade elsewhere.
+      const tile = this.samTileCovering(stack.tile);
+      if (tile === null) continue;
+      this.game.addExecution(
+        new ConstructionExecution(this.player, UnitType.SAMLauncher, tile),
+      );
+      return true;
+    }
+
+    // 2. Stack the SAM of ours that falls shortest of what it guards
+    let best: Unit | null = null;
+    let bestShortfall = 0;
+    for (const sam of this.player.units(UnitType.SAMLauncher)) {
+      if (sam.level() >= STACK_GUARD_MAX_SAM_LEVEL) continue;
+      if (!this.player.canUpgradeUnit(sam)) continue;
+      let weight = 0;
+      for (const stack of stacks) {
+        if (reaches(sam, stack.tile)) weight += stack.weight;
+      }
+      // Every friendly SAM level guarding the same spot counts
+      let guard = 0;
+      for (const other of sams) {
+        if (reaches(other, sam.tile())) guard += other.level();
+      }
+      const wanted = Math.min(
+        STACK_GUARD_MAX_SAM_LEVEL * 2,
+        Math.ceil(weight / levelsPerSam),
+      );
+      const shortfall = wanted - guard;
+      if (shortfall > bestShortfall) {
+        best = sam;
+        bestShortfall = shortfall;
+      }
+    }
+    if (best === null) return false;
+    this.game.addExecution(
+      new UpgradeStructureExecution(this.player, best.id(), 1),
+    );
+    return true;
+  }
+
+  /**
+   * A tile of ours a new SAM can go on that covers `target`: the placement's
+   * pick (away from the border, on high ground) if it reaches, otherwise the
+   * first buildable spot on rings around the target. Null if there is none.
+   */
+  private samTileCovering(target: TileRef): TileRef | null {
+    const game = this.game;
+    const range = game.config().samRange(1);
+    const covers = (tile: TileRef) =>
+      game.euclideanDistSquared(tile, target) <= range * range;
+    const buildableAt = (tile: TileRef): TileRef | null => {
+      const spawn = this.player.canBuild(UnitType.SAMLauncher, tile);
+      return spawn !== false && covers(spawn) ? spawn : null;
+    };
+    const picked = this.placement.spawnTile(UnitType.SAMLauncher);
+    if (picked !== null) {
+      const spawn = buildableAt(picked);
+      if (spawn !== null) return spawn;
+    }
+    const x = game.x(target);
+    const y = game.y(target);
+    for (const share of SAM_RING_SHARES) {
+      const r = Math.max(1, Math.floor(range * share));
+      const d = Math.max(1, Math.floor(r * 0.7));
+      for (const [dx, dy] of [
+        [r, 0],
+        [-r, 0],
+        [0, r],
+        [0, -r],
+        [d, d],
+        [-d, d],
+        [d, -d],
+        [-d, -d],
+      ]) {
+        const tx = x + dx;
+        const ty = y + dy;
+        if (!game.isValidCoord(tx, ty)) continue;
+        const tile = game.ref(tx, ty);
+        if (game.owner(tile) !== this.player) continue;
+        const spawn = buildableAt(tile);
+        if (spawn !== null) return spawn;
+      }
+    }
+    return null;
+  }
+
+  /** Whether any player not friendly to us has a missile silo or a nuclear submarine. */
+  private othersCanNuke(): boolean {
+    for (const p of this.game.players()) {
+      if (p === this.player || this.player.isFriendly(p)) continue;
+      if (
+        p.units(UnitType.MissileSilo).length > 0 ||
+        p.units(UnitType.NuclearSubmarine).length > 0
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The other players on our team (none outside team games). */
+  private teammates(): Player[] {
+    if (this.player.team() === null) return [];
+    return this.game
+      .players()
+      .filter((p) => p !== this.player && this.player.isOnSameTeam(p));
+  }
+
+  /** Whether any other player has an airfield or carrier (anyone who could send planes). */
+  private othersHaveAirBases(): boolean {
+    const game = this.game;
+    const total =
+      game.unitCount(UnitType.Airfield) +
+      game.unitCount(UnitType.AircraftCarrier);
+    // Counted the same way as the game's total.
+    const own =
+      this.player.unitCount(UnitType.Airfield) +
+      this.player.unitCount(UnitType.AircraftCarrier);
+    return total > own;
+  }
+
   // Cities owned, or a territory-based equivalent when cities are disabled
   private cityCount(): number {
-    if (this.game.config().isUnitDisabled(UnitType.City)) {
+    if (aiUnitDisabled(this.game, this.player, UnitType.City)) {
       return Math.max(
         1,
         Math.floor(this.player.numTilesOwned() / TILES_PER_CITY_EQUIVALENT),
@@ -760,7 +1171,7 @@ export class NationStructureBehavior {
     if (
       type === UnitType.Factory &&
       hasCoastalTiles &&
-      !gameConfig.isUnitDisabled(UnitType.Port)
+      !aiUnitDisabled(this.game, this.player, UnitType.Port)
     ) {
       ratio *= FACTORY_COASTAL_RATIO_MULTIPLIER[difficulty];
     }
@@ -774,6 +1185,13 @@ export class NationStructureBehavior {
       }
       // Hard cap on missile silos
       targetCount = Math.min(Math.floor(cityCount * ratio), MAX_MISSILE_SILOS);
+    } else if (type === UnitType.Airfield) {
+      // The first airfield comes early; unitsOwned counts levels, so past
+      // MAX_AIRFIELDS levels the nation stops and its airfields stay small.
+      if (owned === 0) {
+        ratio = FIRST_AIRFIELD_RATIO;
+      }
+      targetCount = Math.min(Math.floor(cityCount * ratio), MAX_AIRFIELDS);
     } else {
       targetCount = Math.floor(cityCount * ratio);
     }
@@ -886,22 +1304,34 @@ export class NationStructureBehavior {
    * Returns 0 if no saving is needed.
    */
   private getSaveUpTarget(): Gold {
-    const config = this.game.config();
-
-    // Just save up for SAMs if missile silos are disabled
-    if (config.isUnitDisabled(UnitType.MissileSilo)) {
-      return this.cost(UnitType.SAMLauncher);
+    // Just save up for SAMs if missile silos are disabled (and for nothing
+    // when this nation can't build SAMs either, e.g. not in its deck)
+    if (aiUnitDisabled(this.game, this.player, UnitType.MissileSilo)) {
+      return aiUnitDisabled(this.game, this.player, UnitType.SAMLauncher)
+        ? 0n
+        : this.cost(UnitType.SAMLauncher);
     }
 
     // Save up a limited amount in team games, synced with NationNukeBehavior
     // Saving up for a MIRV is not relevant
-    if (this.game.config().gameConfig().gameMode === GameMode.Team) {
+    if (
+      this.game.config().gameConfig().gameMode === GameMode.Team &&
+      !aiUnitDisabled(this.game, this.player, UnitType.HydrogenBomb)
+    ) {
       return this.cost(UnitType.HydrogenBomb);
     }
 
-    const mirvEnabled = !config.isUnitDisabled(UnitType.MIRV);
-    const hydroEnabled = !config.isUnitDisabled(UnitType.HydrogenBomb);
-    const atomEnabled = !config.isUnitDisabled(UnitType.AtomBomb);
+    const mirvEnabled = !aiUnitDisabled(this.game, this.player, UnitType.MIRV);
+    const hydroEnabled = !aiUnitDisabled(
+      this.game,
+      this.player,
+      UnitType.HydrogenBomb,
+    );
+    const atomEnabled = !aiUnitDisabled(
+      this.game,
+      this.player,
+      UnitType.AtomBomb,
+    );
 
     // Not for a MIRV that SAMs would shoot down
     if (mirvEnabled && this.isMirvWorthSavingFor()) {

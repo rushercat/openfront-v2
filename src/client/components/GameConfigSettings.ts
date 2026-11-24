@@ -1,9 +1,12 @@
 import {
   Difficulty,
   Duos,
+  GameFeature,
   GameMapType,
   GameMode,
+  HistoricalScenarioId,
   HumansVsNations,
+  maps,
   Quads,
   Trios,
   UnitType,
@@ -14,6 +17,11 @@ import {
   DoomsdayClockSpeed,
 } from "@openfront/engine-lib/game/DoomsdayClock";
 import {
+  HISTORICAL_SCENARIOS,
+  historicalScenario,
+} from "@openfront/engine-lib/game/HistoricalScenarios";
+import type { CustomMapInfo } from "@openfront/shared/CustomMaps";
+import {
   LitElement,
   SVGTemplateResult,
   TemplateResult,
@@ -22,6 +30,11 @@ import {
   svg,
 } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import {
+  COMPLEXITY_LEVELS,
+  ComplexityLevel,
+  detectComplexity,
+} from "../utilities/ComplexityPresets";
 import { translateText } from "../Utils";
 import "./Difficulties";
 import "./DifficultyInfo";
@@ -119,6 +132,39 @@ const unitOptions: { type: UnitType; translationKey: string }[] = [
   { type: UnitType.HydrogenBomb, translationKey: "unit_type.hydrogen_bomb" },
   { type: UnitType.MIRV, translationKey: "unit_type.mirv" },
   { type: UnitType.Factory, translationKey: "unit_type.factory" },
+  { type: UnitType.AADefense, translationKey: "unit_type.aa_defense" },
+  { type: UnitType.Airfield, translationKey: "unit_type.airfield" },
+  { type: UnitType.FighterJet, translationKey: "unit_type.fighter_jet" },
+  { type: UnitType.Bomber, translationKey: "unit_type.bomber" },
+  {
+    type: UnitType.NuclearSubmarine,
+    translationKey: "unit_type.nuclear_submarine",
+  },
+  { type: UnitType.RailDepot, translationKey: "unit_type.rail_depot" },
+  { type: UnitType.Tank, translationKey: "unit_type.tank" },
+  { type: UnitType.LandMine, translationKey: "unit_type.land_mine" },
+  { type: UnitType.SeaMine, translationKey: "unit_type.sea_mine" },
+  {
+    type: UnitType.RepairStation,
+    translationKey: "unit_type.repair_station",
+  },
+  {
+    type: UnitType.AircraftCarrier,
+    translationKey: "unit_type.aircraft_carrier",
+  },
+  { type: UnitType.CruiseMissile, translationKey: "unit_type.cruise_missile" },
+  {
+    type: UnitType.TransportPlane,
+    translationKey: "unit_type.transport_plane",
+  },
+];
+
+/** The mechanics a lobby can switch off, next to the units. */
+const featureOptions: { feature: GameFeature; translationKey: string }[] = [
+  { feature: GameFeature.Capital, translationKey: "game_feature.capital" },
+  { feature: GameFeature.Unrest, translationKey: "game_feature.unrest" },
+  { feature: GameFeature.Secession, translationKey: "game_feature.secession" },
+  { feature: GameFeature.Politics, translationKey: "game_feature.politics" },
 ];
 
 const MAP_ICON = svg`<path
@@ -197,6 +243,20 @@ export interface GameConfigSettingsData {
     randomMapDivider?: boolean;
     showMedals?: boolean;
     mapWins?: Map<GameMapType, Set<Difficulty>>;
+    /** openfront v2: uploaded custom maps (null: still loading or failed). */
+    customMaps?: CustomMapInfo[] | null;
+    customMapsError?: boolean;
+    selectedCustomMapId?: string | null;
+  };
+  /**
+   * openfront v2: the historical scenario mode. When one is selected it
+   * fixes the map, and the mode section shows the scenario instead of
+   * FFA/Teams.
+   */
+  scenario?: {
+    selected: HistoricalScenarioId | null;
+    /** Secret missions (GameConfig.scenarioMissions). */
+    missions?: boolean;
   };
   difficulty: {
     selected: Difficulty;
@@ -234,6 +294,8 @@ export interface GameConfigSettingsData {
   unitTypes: {
     titleKey: string;
     disabledUnits: UnitType[];
+    /** Mechanics switched off; leave out where they can't be. */
+    disabledFeatures?: GameFeature[];
   };
 }
 
@@ -242,6 +304,7 @@ export class GameConfigSettings extends LitElement {
   @property({ attribute: false }) settings?: GameConfigSettingsData;
   @property({ attribute: false }) sectionGapClass = "space-y-6";
   @state() private mapSearchQuery = "";
+  @state() private advancedUnitsOpen = false;
 
   createRenderRoot() {
     return this;
@@ -273,6 +336,111 @@ export class GameConfigSettings extends LitElement {
   private handleSelectRandom = () => {
     this.emit("random-map-selected", {});
   };
+
+  private handleSelectCustomMap = (map: CustomMapInfo) => {
+    this.emit("custom-map-selected", { id: map.id });
+  };
+
+  private handleRefreshCustomMaps = () => {
+    this.emit("custom-maps-refresh", {});
+  };
+
+  private handleScenarioSelect = (id: HistoricalScenarioId | null) => {
+    this.emit("scenario-selected", { id });
+  };
+
+  /** Secret Risk-style missions: on or off for the scenario. */
+  private renderMissionsToggle(enabled: boolean) {
+    return html`
+      <button
+        class="${cardClass(enabled, "p-4 text-left flex items-start gap-3")}"
+        @click=${() =>
+          this.emit("scenario-missions-changed", { enabled: !enabled })}
+      >
+        <span class="text-2xl leading-none">${enabled ? "🎯" : "🗺️"}</span>
+        <span class="flex flex-col gap-1">
+          <span class="text-sm font-bold text-white uppercase tracking-widest">
+            ${translateText("historical_scenario.missions_toggle")}
+            <span
+              class="ml-2 text-xs ${enabled ? "text-green-400" : "text-white/40"}"
+              >${translateText(
+                enabled
+                  ? "historical_scenario.missions_on"
+                  : "historical_scenario.missions_off",
+              )}</span
+            >
+          </span>
+          <span class="text-xs text-white/60 normal-case">
+            ${translateText("historical_scenario.missions_hint")}
+          </span>
+        </span>
+      </button>
+    `;
+  }
+
+  /** The scenario mode's picker: each scenario with its blocs. */
+  private renderScenarios(selected: HistoricalScenarioId | null) {
+    return html`
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        ${Object.values(HISTORICAL_SCENARIOS).map((scenario) => {
+          const isSelected = selected === scenario.id;
+          const bloc = (key: string | null) =>
+            scenario.nations.filter((n) => n.bloc === key);
+          return html`
+            <button
+              class="${cardClass(isSelected, "p-4 text-left flex flex-col gap-2")}"
+              @click=${() => this.handleScenarioSelect(scenario.id)}
+            >
+              <span
+                class="text-sm font-bold text-white uppercase tracking-widest"
+              >
+                ${translateText(scenario.nameKey)}
+              </span>
+              <span class="text-xs text-white/60 normal-case">
+                ${translateText(scenario.descriptionKey)}
+              </span>
+              <span class="text-xs text-amber-300/90 normal-case">
+                ${translateText("historical_scenario.counts", {
+                  majors: scenario.nations.filter((n) => n.major).length,
+                  nations: scenario.nations.length,
+                })}
+              </span>
+              <div class="flex flex-col gap-1 text-xs normal-case">
+                ${scenario.blocs.map(
+                  (b) =>
+                    html`<div>
+                      <span class="font-bold text-white/80"
+                        >${translateText(b.nameKey)}:</span
+                      >
+                      <span class="text-white/60"
+                        >${bloc(b.key)
+                          .map((n) => n.name)
+                          .join(", ")}</span
+                      >
+                    </div>`,
+                )}
+                <div>
+                  <span class="font-bold text-white/80"
+                    >${translateText(
+                      scenario.blocs.length > 0
+                        ? "historical_scenario.bloc.neutral"
+                        : "historical_scenario.great_powers",
+                    )}:</span
+                  >
+                  <span class="text-white/60"
+                    >${bloc(null)
+                      .filter((n) => scenario.blocs.length > 0 || n.major)
+                      .map((n) => n.name)
+                      .join(", ")}</span
+                  >
+                </div>
+              </div>
+            </button>
+          `;
+        })}
+      </div>
+    `;
+  }
 
   private handleDifficultySelect = (difficulty: Difficulty) => {
     this.emit("difficulty-selected", { difficulty });
@@ -318,6 +486,31 @@ export class GameConfigSettings extends LitElement {
   private handleUnitToggle = (unit: UnitType, checked: boolean) => {
     this.emit("unit-toggle-changed", { unit, checked });
   };
+
+  private handleFeatureToggle = (feature: GameFeature, checked: boolean) => {
+    this.emit("feature-toggle-changed", { feature, checked });
+  };
+
+  private renderFeatureOptions(
+    disabledFeatures: GameFeature[] | undefined,
+  ): TemplateResult[] {
+    if (disabledFeatures === undefined) return [];
+    return featureOptions.map(({ feature, translationKey }) => {
+      const isEnabled = !disabledFeatures.includes(feature);
+      return html`
+        <button
+          class="${cardClass(isEnabled, "p-4 text-center")}"
+          aria-pressed=${isEnabled}
+          title=${translateText(`${translationKey}_desc`)}
+          @click=${() => this.handleFeatureToggle(feature, isEnabled)}
+        >
+          <span class="${CARD_LABEL_CLASS} ${stateTextClass(isEnabled)}">
+            ${translateText(translationKey)}
+          </span>
+        </button>
+      `;
+    });
+  }
 
   private renderOptionToggle(toggle: ToggleOptionConfig): TemplateResult {
     if (toggle.hidden) return html``;
@@ -371,6 +564,51 @@ export class GameConfigSettings extends LitElement {
                   )}
                 </select>
               `
+            : nothing
+        }
+      </div>
+    `;
+  }
+
+  private handleComplexitySelect = (level: ComplexityLevel) => {
+    this.emit("complexity-selected", { level });
+  };
+
+  /** Klassik / Modern / Total: one click instead of 20 switches. */
+  private renderComplexityPicker(
+    disabledUnits: UnitType[],
+    disabledFeatures: GameFeature[] | undefined,
+  ): TemplateResult {
+    const current = detectComplexity(disabledUnits, disabledFeatures);
+    return html`
+      <div class="space-y-2">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          ${COMPLEXITY_LEVELS.map(
+            (level) => html`
+              <button
+                class="${cardClass(current === level, "p-4 text-left")}"
+                aria-pressed=${current === level}
+                @click=${() => this.handleComplexitySelect(level)}
+              >
+                <div
+                  class="${CARD_LABEL_CLASS} ${stateTextClass(
+                    current === level,
+                  )}"
+                >
+                  ${translateText(`complexity.${level}`)}
+                </div>
+                <div class="text-xs text-white/50 mt-1 normal-case">
+                  ${translateText(`complexity.${level}_desc`)}
+                </div>
+              </button>
+            `,
+          )}
+        </div>
+        ${
+          current === null
+            ? html`<div class="text-xs text-white/50">
+                ${translateText("complexity.custom")}
+              </div>`
             : nothing
         }
       </div>
@@ -438,24 +676,49 @@ export class GameConfigSettings extends LitElement {
 
     return html`
       <div class=${this.sectionGapClass}>
-        ${renderSection(
-          MAP_ICON,
-          "text-aquarius",
-          "bg-malibu-blue/20",
-          "map.map",
-          html`<map-picker
-            .selectedMap=${settings.map.selected}
-            .useRandomMap=${settings.map.useRandom}
-            .randomMapDivider=${settings.map.randomMapDivider ?? false}
-            .showMedals=${settings.map.showMedals ?? false}
-            .mapWins=${settings.map.mapWins ?? new Map()}
-            .onSelectMap=${this.handleSelectMap}
-            .onSelectRandom=${this.handleSelectRandom}
-            .searchQuery=${this.mapSearchQuery}
-          ></map-picker>`,
-          undefined,
-          this.renderMapSearchInput(),
-        )}
+        ${
+          (settings.scenario?.selected ?? null) !== null
+            ? renderSection(
+                MAP_ICON,
+                "text-aquarius",
+                "bg-malibu-blue/20",
+                "map.map",
+                html`<p class="text-sm text-white/60">
+                  ${translateText("historical_scenario.map_locked", {
+                    map: translateText(
+                      maps.find(
+                        (m) =>
+                          m.type ===
+                          historicalScenario(settings.scenario!.selected!).map,
+                      )?.translationKey ?? "map.map",
+                    ),
+                  })}
+                </p>`,
+              )
+            : renderSection(
+                MAP_ICON,
+                "text-aquarius",
+                "bg-malibu-blue/20",
+                "map.map",
+                html`<map-picker
+                  .selectedMap=${settings.map.selected}
+                  .useRandomMap=${settings.map.useRandom}
+                  .randomMapDivider=${settings.map.randomMapDivider ?? false}
+                  .showMedals=${settings.map.showMedals ?? false}
+                  .mapWins=${settings.map.mapWins ?? new Map()}
+                  .onSelectMap=${this.handleSelectMap}
+                  .onSelectRandom=${this.handleSelectRandom}
+                  .searchQuery=${this.mapSearchQuery}
+                  .customMaps=${settings.map.customMaps ?? null}
+                  .customMapsError=${settings.map.customMapsError ?? false}
+                  .selectedCustomMapId=${settings.map.selectedCustomMapId ?? null}
+                  .onSelectCustomMap=${this.handleSelectCustomMap}
+                  .onRefreshCustomMaps=${this.handleRefreshCustomMaps}
+                ></map-picker>`,
+                undefined,
+                this.renderMapSearchInput(),
+              )
+        }
         ${renderSection(
           DIFFICULTY_ICON,
           "text-green-400",
@@ -510,9 +773,13 @@ export class GameConfigSettings extends LitElement {
           "bg-purple-500/20",
           "host_modal.mode",
           html`
-            <div class="grid grid-cols-2 gap-4">
+            <div
+              class="grid ${settings.scenario ? "grid-cols-3" : "grid-cols-2"} gap-4"
+            >
               ${[GameMode.FFA, GameMode.Team].map((mode) => {
-                const isSelected = settings.gameMode.selected === mode;
+                const isSelected =
+                  settings.gameMode.selected === mode &&
+                  (settings.scenario?.selected ?? null) === null;
                 return html`
                   <button
                     class="${cardClass(isSelected, "py-6 text-center")}"
@@ -530,11 +797,43 @@ export class GameConfigSettings extends LitElement {
                   </button>
                 `;
               })}
+              ${
+                settings.scenario
+                  ? html`<button
+                      class="${cardClass(
+                        settings.scenario.selected !== null,
+                        "py-6 text-center",
+                      )}"
+                      @click=${() =>
+                        this.handleScenarioSelect(
+                          settings.scenario!.selected ??
+                            HistoricalScenarioId.Europe1939,
+                        )}
+                    >
+                      <span
+                        class="text-sm font-bold text-white uppercase tracking-widest"
+                      >
+                        ${translateText("game_mode.scenarios")}
+                      </span>
+                    </button>`
+                  : nothing
+              }
             </div>
+            ${
+              (settings.scenario?.selected ?? null) !== null
+                ? html`<div class="mt-4 flex flex-col gap-4">
+                    ${this.renderMissionsToggle(
+                      settings.scenario!.missions ?? false,
+                    )}
+                    ${this.renderScenarios(settings.scenario!.selected)}
+                  </div>`
+                : nothing
+            }
           `,
         )}
         ${
-          settings.gameMode.selected === GameMode.FFA
+          settings.gameMode.selected === GameMode.FFA ||
+          (settings.scenario?.selected ?? null) !== null
             ? nothing
             : html`
                 <section class="space-y-6">
@@ -663,9 +962,30 @@ export class GameConfigSettings extends LitElement {
           "bg-teal-500/20",
           settings.unitTypes.titleKey,
           html`
-            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-              ${this.renderUnitTypeOptions(settings.unitTypes.disabledUnits)}
-            </div>
+            ${this.renderComplexityPicker(
+              settings.unitTypes.disabledUnits,
+              settings.unitTypes.disabledFeatures,
+            )}
+            <details
+              class="group"
+              ?open=${this.advancedUnitsOpen}
+              @toggle=${(e: Event) =>
+                (this.advancedUnitsOpen = (
+                  e.target as HTMLDetailsElement
+                ).open)}
+            >
+              <summary
+                class="cursor-pointer select-none text-sm text-white/60 hover:text-white/90 mb-4"
+              >
+                ${translateText("complexity.advanced")}
+              </summary>
+              <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                ${this.renderUnitTypeOptions(settings.unitTypes.disabledUnits)}
+                ${this.renderFeatureOptions(
+                  settings.unitTypes.disabledFeatures,
+                )}
+              </div>
+            </details>
           `,
           "space-y-6 pb-6",
         )}

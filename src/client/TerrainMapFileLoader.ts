@@ -43,8 +43,14 @@ export function loadCachedManifest(map: GameMapId): Promise<MapManifest> {
 export async function loadCachedTerrainMap(
   map: GameMapId,
   mapSize: GameMapSize,
+  // An uploaded custom map (openfront v2): loaded as the Custom map first.
+  customMapId?: string,
 ): Promise<TerrainMapData> {
   if (map === CustomGameMap) {
+    if (customMapId !== undefined) {
+      const { ensureCustomMapLoaded } = await import("./CustomMapsApi");
+      await ensureCustomMapLoaded(customMapId);
+    }
     return loadTerrainMap(
       await loadMapFiles(terrainMapFileLoader, map, mapSize),
     );

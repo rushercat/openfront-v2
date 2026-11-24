@@ -1,5 +1,6 @@
 import { TileRef } from "@openfront/engine-api/game/GameMap";
 import {
+  Aircraft,
   AllPlayers,
   BuildableAttacks,
   bulkCost,
@@ -29,6 +30,7 @@ import { TooltipItem } from "./RadialMenu";
 import { EventBus } from "@openfront/shared/EventBus";
 import {
   BuildUnitIntentEvent,
+  paradropTroops,
   SendUpgradeStructureIntentEvent,
 } from "../../Transport";
 const allianceIcon = assetUrl("images/AllianceIconWhite.svg");
@@ -405,8 +407,15 @@ function getAllEnabledUnits(
 
   if (myPlayer) {
     Structures.types.forEach(addIfEnabled);
+    // Aircraft fly anywhere: over one's own land they are part of the build
+    // menu (a fighter on guard), elsewhere of the attack menu. Tanks too.
+    Aircraft.types.forEach(addIfEnabled);
+    addIfEnabled(UnitType.Tank);
+    addIfEnabled(UnitType.LandMine);
   } else {
     BuildableAttacks.types.forEach(addIfEnabled);
+    // A sea mine goes on water, which nobody owns.
+    addIfEnabled(UnitType.SeaMine);
   }
 
   return units;
@@ -427,8 +436,12 @@ function createMenuElements(
       (item) =>
         unitTypes.has(item.unitType) &&
         (filterType === "attack"
-          ? BuildableAttacks.has(item.unitType)
-          : !BuildableAttacks.has(item.unitType)),
+          ? BuildableAttacks.has(item.unitType) ||
+            item.unitType === UnitType.SeaMine
+          : (!BuildableAttacks.has(item.unitType) &&
+              item.unitType !== UnitType.SeaMine) ||
+            Aircraft.has(item.unitType) ||
+            item.unitType === UnitType.Tank),
     )
     .map((item: BuildItemDisplay) => {
       return {
@@ -586,6 +599,12 @@ function createMenuElements(
                   buildableUnit.type,
                   params.tile,
                   rocketDirectionUp,
+                  undefined,
+                  paradropTroops(
+                    buildableUnit.type,
+                    () => params.game.myPlayer()?.troops(),
+                    params.uiState?.attackRatio,
+                  ),
                 ),
               );
             }

@@ -1,3 +1,4 @@
+import { draftDeckOf, draftFactor } from "@openfront/engine-api/game/Draft";
 import { TileRef } from "@openfront/engine-api/game/GameMap";
 import {
   BuildableUnit,
@@ -20,6 +21,10 @@ import {
   AttackUpdate,
   PlayerUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
+import {
+  decreeFactor,
+  PoliticsFactor,
+} from "@openfront/engine-api/game/Politics";
 import { PlayerLike } from "@openfront/engine-api/game/ReadViews";
 import { ClientID } from "@openfront/engine-api/Schemas";
 import { PatternDecoder } from "@openfront/shared/PatternDecoder";
@@ -599,6 +604,31 @@ export class PlayerView implements PlayerLike {
   }
   isDecaying(): boolean {
     return this.state.isDecaying;
+  }
+
+  /**
+   * Decrees in force and draft perks, like Player.politicsFactor in the
+   * engine, so client estimates (troop rate, income) match the engine.
+   */
+  politicsFactor(kind: PoliticsFactor): number {
+    let factor = 1;
+    const politics = this.game.politics();
+    if (politics !== null && politics.active.length > 0) {
+      factor *= decreeFactor(
+        politics.active,
+        this.smallID(),
+        new Set(politics.bottomThird ?? []),
+        kind,
+      );
+    }
+    const deck = draftDeckOf(this.game.draft(), this.smallID());
+    if (deck !== null && deck.size > 0) factor *= draftFactor(deck, kind);
+    return factor;
+  }
+
+  /** Freshly conquered land as a share of the player's land, 0 to 1. */
+  unrestShare(): number {
+    return (this.state.unrestPercent ?? 0) / 100;
   }
   doomsdayClockTicks(): number {
     return this.inDoomsdayClock()

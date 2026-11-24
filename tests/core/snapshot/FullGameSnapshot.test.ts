@@ -196,7 +196,28 @@ describe.each(VARIANTS)("full game snapshots: %s", (_, overrides) => {
       if (Object.keys(overrides).length > 0) return; // checked once, on FFA
       // Runs during the spawn phase and finishes inside init, so it is never
       // alive at a tick boundary. BasicExecutions.test.ts covers it directly.
-      const neverStored = new Set(["Pause"]);
+      // So does the surface_submarine order: only players give it, so it is
+      // never queued from inside another execution's tick.
+      // GroundAndNavalWarfare.test.ts snapshots a game right after one.
+      // HistoricalScenario runs on a scenario game's first tick and is done
+      // there (HistoricalScenario.test.ts). A RepairStation only comes up
+      // once something is damaged; StructureDamage.test.ts snapshots one.
+      // The congress's propose/vote orders finish inside init too
+      // (Politics.test.ts snapshots a game in the middle of a vote).
+      // The draft mode is opt-in; Draft.test.ts snapshots one mid-draft.
+      // So are scenario missions; HistoricalScenario.test.ts snapshots them.
+      const neverStored = new Set([
+        "Missions",
+        "Draft",
+        "DraftPick",
+        "DraftResearch",
+        "Pause",
+        "ProposeDecree",
+        "CastVote",
+        "SurfaceSubmarine",
+        "HistoricalScenario",
+        "RepairStation",
+      ]);
       const missing = EXECUTION_SNAPSHOT_TYPES.map((t) => t.name).filter(
         (name) => !reference.execTypes.has(name) && !neverStored.has(name),
       );

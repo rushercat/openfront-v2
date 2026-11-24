@@ -1,3 +1,11 @@
+import {
+  draftAllowsUnit,
+  draftDeckOf,
+  draftGovernedUnits,
+  DraftSettings,
+  draftSettings,
+  DraftViewState,
+} from "@openfront/engine-api/game/Draft";
 import { GameMap, TileRef } from "@openfront/engine-api/game/GameMap";
 import {
   Cell,
@@ -18,6 +26,14 @@ import {
   SpawnPhaseEndUpdate,
   UnitUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
+import type {
+  MissionsViewState,
+  PlayerMissionView,
+} from "@openfront/engine-api/game/Missions";
+import {
+  politicsFrozenAt,
+  PoliticsViewState,
+} from "@openfront/engine-api/game/Politics";
 import {
   GameLike,
   ReadonlyTileSet,
@@ -45,7 +61,11 @@ import type { SpiralParams } from "../render/frame/SpiralTrails";
 import { SpiralTrails } from "../render/frame/SpiralTrails";
 import { TrailManager } from "../render/frame/TrailManager";
 import type { FrameData, NameEntry } from "../render/types";
-import { STRUCTURE_TYPES, TRAIL_TYPES } from "../render/types";
+import {
+  HIDDEN_UNIT_TYPES,
+  STRUCTURE_TYPES,
+  TRAIL_TYPES,
+} from "../render/types";
 import { UserSettings } from "../UserSettings";
 import { resolveTeamClanTag } from "../Utils";
 import { WorkerClient } from "../WorkerClient";
@@ -69,6 +89,13 @@ function readCosmeticVisibility(): CosmeticVisibility {
 
 export class GameView implements GameLike {
   private lastUpdate: GameUpdateViewData | null;
+  /** The world congress as last sent by the engine (Politics). */
+  private _politics: PoliticsViewState | null = null;
+  /** The draft as last sent by the engine (GameConfig.draft). */
+  private _draft: DraftViewState | null = null;
+  private _missions: MissionsViewState | null = null;
+  private _draftSettings: DraftSettings | null | undefined = undefined;
+  private _draftGoverned: Set<UnitType> | null = null;
   private startTick: Tick | null = null;
   private smallIDToID = new Map<number, PlayerID>();
   private _players = new Map<PlayerID, PlayerView>();
@@ -227,6 +254,57 @@ export class GameView implements GameLike {
 
   public updatesSinceLastTick(): GameUpdates | null {
     return this.lastUpdate?.updates ?? null;
+  }
+
+  /** The world congress, or null before the engine sent it (or when off). */
+  public politics(): PoliticsViewState | null {
+    return this._politics;
+  }
+
+  /** Whether the last tick was frozen for a congress vote. */
+  public isFrozenForVote(): boolean {
+    const tick = this.lastUpdate?.tick;
+    return tick !== undefined && politicsFrozenAt(this._politics, tick - 1);
+  }
+
+  /** The draft, or null before the engine sent it (or when off). */
+  public draft(): DraftViewState | null {
+    return this._draft;
+  }
+
+  /** Scenario missions, or null when they are off (or not dealt yet). */
+  public missions(): MissionsViewState | null {
+    return this._missions;
+  }
+
+  /** My own secret mission, if I have one. */
+  public myMission(): PlayerMissionView | null {
+    const me = this.myPlayer();
+    if (me === null || this._missions === null) return null;
+    return (
+      this._missions.missions.find((m) => m.player === me.smallID()) ?? null
+    );
+  }
+
+  /** The draft settings of this game, or null when the draft is off. */
+  public draftSettings(): DraftSettings | null {
+    if (this._draftSettings === undefined) {
+      this._draftSettings = draftSettings(this._config.gameConfig().draft);
+      this._draftGoverned =
+        this._draftSettings === null
+          ? null
+          : draftGovernedUnits(this._draftSettings);
+    }
+    return this._draftSettings;
+  }
+
+  /** Whether my deck keeps me from building this (draft mode). */
+  public isDraftLocked(type: UnitType): boolean {
+    const s = this.draftSettings();
+    const me = this.myPlayer();
+    if (s === null || me === null || this._draft === null) return false;
+    const deck = draftDeckOf(this._draft, me.smallID());
+    return !draftAllowsUnit(s, deck, type, this._draftGoverned ?? undefined);
   }
 
   public isPaused(): boolean {
@@ -460,6 +538,15 @@ export class GameView implements GameLike {
       } else if (unit.tile() !== unit.lastTile()) {
         this.unitGrid.updateUnitCell(unit);
       }
+      // Keep other players' mines and submerged submarines away from the
+      // renderer; a submarine that surfaces shows up again.
+      if (HIDDEN_UNIT_TYPES.has(update.unitType)) {
+        if (this.isHiddenFromMe(unit)) {
+          this._unitStates.delete(update.id);
+        } else if (!this._unitStates.has(update.id)) {
+          this._unitStates.set(update.id, unit.state);
+        }
+      }
       if (!unit.isActive()) {
         // Wait until next tick to delete the unit.
         this.toDelete.add(unit.id());
@@ -467,7 +554,27 @@ export class GameView implements GameLike {
       }
     });
 
-    this.motion.advance(gu.tick, this.plannedUnits);
+    const politicsUpdates = gu.updates[GameUpdateType.Politics] ?? [];
+    if (politicsUpdates.length > 0) {
+      this._politics = politicsUpdates[politicsUpdates.length - 1].state;
+    }
+    const draftUpdates = gu.updates[GameUpdateType.Draft] ?? [];
+    if (draftUpdates.length > 0) {
+      this._draft = draftUpdates[draftUpdates.length - 1].state;
+    }
+    const missionUpdates = gu.updates[GameUpdateType.Missions] ?? [];
+    if (missionUpdates.length > 0) {
+      this._missions = missionUpdates[missionUpdates.length - 1].state;
+    }
+    // gu.tick is the tick after the one that ran: a frozen tick moved nothing.
+    if (
+      politicsFrozenAt(this._politics, gu.tick - 1) ||
+      politicsFrozenAt(this._draft, gu.tick - 1)
+    ) {
+      this.motion.hold(gu.tick);
+    } else {
+      this.motion.advance(gu.tick, this.plannedUnits);
+    }
 
     this.populateFrame(gu);
   }
@@ -765,6 +872,23 @@ export class GameView implements GameLike {
     return this._myClientID;
   }
 
+  /**
+   * Whether the local player may not see `unit`: another player's mine, or
+   * another player's submerged submarine. Spectators see everything.
+   */
+  isHiddenFromMe(unit: UnitView): boolean {
+    const type = unit.type();
+    const hideable =
+      type === UnitType.LandMine ||
+      type === UnitType.SeaMine ||
+      (type === UnitType.NuclearSubmarine && unit.state.submerged);
+    if (!hideable) {
+      return false;
+    }
+    const me = this.myPlayer();
+    return me !== null && unit.owner().id() !== me.id();
+  }
+
   myPlayer(): PlayerView | null {
     return this._myPlayer;
   }
@@ -999,6 +1123,9 @@ export class GameView implements GameLike {
   }
   waterVersion(): number {
     return this._map.waterVersion();
+  }
+  terrainVersion(): number {
+    return this._map.terrainVersion();
   }
   /** Map layers defined in the map's info.json, if any. */
   layers(): import("@openfront/engine-api/game/MapFiles").MapLayer[] {

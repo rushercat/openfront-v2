@@ -28,6 +28,8 @@ export class SteamWishlistButton extends LitElement {
   }
 
   render() {
+    // openfront v2: no store promotion on our own server.
+    if (window.adsEnabled === false || window.__noAds === true) return nothing;
     if (isDesktopShell() || gamePortal.name() === "poki") return nothing;
 
     return html`

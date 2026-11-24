@@ -9,11 +9,13 @@ import {
   Tick,
   UnitType,
 } from "@openfront/engine-api/game/GameTypes";
+import { PoliticsFactor } from "@openfront/engine-api/game/Politics";
 import { PlayerLike } from "@openfront/engine-api/game/ReadViews";
 import { TeamCountConfig } from "@openfront/engine-api/Schemas";
 import { NukeType } from "@openfront/engine-api/StatsSchemas";
 import { Config } from "@openfront/engine-lib/configuration/Config";
 import { exp, log, pow2 } from "@openfront/engine-lib/DetMath";
+import { structureHealthFraction } from "@openfront/engine-lib/game/UnitHealth";
 import {
   assertNever,
   sigmoid,
@@ -53,6 +55,9 @@ export interface AttackLogicResult {
    */
   tickFraction: number;
 }
+
+/** Gold per tick a finished factory produces per level (500 a second). */
+const FACTORY_GOLD_PER_LEVEL_TICK = 50;
 
 // attackLogic tunables
 const LARGE_TERRITORY_MIDPOINT = 300_000;
@@ -258,12 +263,18 @@ export class EngineConfig extends Config {
         baseGold = 25_000;
         break;
       case "self":
-        baseGold = 10_000;
+        // Buffed from 10k with the factory rework: a factory's own network
+        // now pays its way.
+        baseGold = 15_000;
         break;
     }
     const distPenalty = citiesVisited * 5_000;
     const gold = Math.max(5000, baseGold - distPenalty);
-    return toInt(gold * this.goldMultiplierFor(player));
+    return toInt(
+      gold *
+        this.goldMultiplierFor(player) *
+        (player.politicsFactor?.(PoliticsFactor.TradeGold) ?? 1),
+    );
   }
 
   trainStationMinRange(): number {
@@ -277,7 +288,13 @@ export class EngineConfig extends Config {
     // Sigmoid: concave start, sharp S-curve middle, linear end - heavily punishes trades under range debuff.
     const debuff = this.tradeShipShortRangeDebuff();
     const baseGold = 75_000 / (1 + exp(-0.03 * (dist - debuff))) + 50 * dist;
-    return BigInt(Math.floor(baseGold * this.goldMultiplierFor(player)));
+    return BigInt(
+      Math.floor(
+        baseGold *
+          this.goldMultiplierFor(player) *
+          (player.politicsFactor?.(PoliticsFactor.TradeGold) ?? 1),
+      ),
+    );
   }
 
   /**
@@ -339,7 +356,17 @@ export class EngineConfig extends Config {
     if (cached !== undefined) {
       return cached;
     }
-    const info = { ...super.unitInfo(type), cost: this.unitCost(type) };
+    const baseCost = this.unitCost(type);
+    // Decrees of the world congress (recession, arms boom, black market…).
+    const cost: EngineUnitInfo["cost"] = (game, player, extraUnits) => {
+      const base = baseCost(game, player, extraUnits);
+      const factor =
+        (game.politics()?.costFactor(type) ?? 1) *
+        (game.draft()?.costFactor(player, type) ?? 1);
+      if (factor === 1 || base === 0n) return base;
+      return BigInt(Math.floor(Number(base) * factor));
+    };
+    const info = { ...super.unitInfo(type), cost };
     this.engineUnitInfoCache.set(type, info);
     return info;
   }
@@ -393,6 +420,76 @@ export class EngineConfig extends Config {
           (numUnits: number) => Math.min(1_000_000, pow2(numUnits) * 125_000),
           UnitType.Factory,
           UnitType.Port,
+        );
+      case UnitType.AADefense:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(1_000_000, (numUnits + 1) * 250_000),
+          UnitType.AADefense,
+        );
+      case UnitType.Airfield:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(2_000_000, (numUnits + 1) * 500_000),
+          UnitType.Airfield,
+        );
+      case UnitType.FighterJet:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(800_000, (numUnits + 1) * 200_000),
+          UnitType.FighterJet,
+        );
+      case UnitType.Bomber:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(1_200_000, (numUnits + 1) * 300_000),
+          UnitType.Bomber,
+        );
+      case UnitType.NuclearSubmarine:
+        return this.costWrapper(
+          (numUnits: number) =>
+            Math.min(3_000_000, 1_000_000 + numUnits * 500_000),
+          UnitType.NuclearSubmarine,
+        );
+      case UnitType.RepairStation:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(800_000, (numUnits + 1) * 200_000),
+          UnitType.RepairStation,
+        );
+      case UnitType.RailDepot:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(1_600_000, (numUnits + 1) * 400_000),
+          UnitType.RailDepot,
+        );
+      case UnitType.Tank:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(600_000, (numUnits + 1) * 150_000),
+          UnitType.Tank,
+        );
+      case UnitType.AircraftCarrier:
+        return this.costWrapper(
+          (numUnits: number) =>
+            Math.min(4_000_000, 1_500_000 + numUnits * 750_000),
+          UnitType.AircraftCarrier,
+        );
+      // Between a bomber run and an atom bomb.
+      case UnitType.CruiseMissile:
+        return this.costWrapper(() => 350_000, UnitType.CruiseMissile);
+      case UnitType.TransportPlane:
+        return this.costWrapper(() => 200_000, UnitType.TransportPlane);
+      // A player without a capital gets one for free (CapitalSystemExecution
+      // sets it up); moving it costs 1M.
+      case UnitType.Capital:
+        return this.costWrapper(
+          (numUnits: number) => (numUnits === 0 ? 0 : 1_000_000),
+          UnitType.Capital,
+        );
+      // Like a city: 125k, doubling with each mine, at most 1M.
+      case UnitType.LandMine:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(1_000_000, pow2(numUnits) * 125_000),
+          UnitType.LandMine,
+        );
+      case UnitType.SeaMine:
+        return this.costWrapper(
+          (numUnits: number) => Math.min(1_000_000, pow2(numUnits) * 125_000),
+          UnitType.SeaMine,
         );
       case UnitType.TransportShip:
       case UnitType.Shell:
@@ -672,8 +769,36 @@ export class EngineConfig extends Config {
     return this.hasInfiniteTroopsForInfo(playerInfo) ? 1_000_000 : 25_000;
   }
 
+  /**
+   * Gold per tick a player's finished factories produce on their own, on top
+   * of the trains they send out: 50 per level (500 a second), scaled by each
+   * factory's health, so a bombed factory produces less.
+   */
+  factoryGoldRate(player: PlayerLike): Gold {
+    let perTick = 0;
+    for (const factory of player.units(UnitType.Factory)) {
+      if (factory.isUnderConstruction()) continue;
+      perTick +=
+        FACTORY_GOLD_PER_LEVEL_TICK *
+        factory.level() *
+        structureHealthFraction(factory);
+    }
+    if (perTick <= 0) return 0n;
+    return BigInt(
+      Math.floor(
+        perTick *
+          this.goldMultiplierFor(player) *
+          this.capitalUnrestFactor(player, this.capitalGoldBonusPercent()) *
+          (player.politicsFactor?.(PoliticsFactor.GoldIncome) ?? 1),
+      ),
+    );
+  }
+
   goldAdditionRate(player: PlayerLike): Gold {
-    const multiplier = this.goldMultiplierFor(player);
+    const multiplier =
+      this.goldMultiplierFor(player) *
+      this.capitalUnrestFactor(player, this.capitalGoldBonusPercent()) *
+      (player.politicsFactor?.(PoliticsFactor.GoldIncome) ?? 1);
     let baseRate: bigint;
     if (player.type() === PlayerType.Bot) {
       baseRate = 50n;
@@ -713,6 +838,10 @@ export class EngineConfig extends Config {
   }
 
   dynamicSamRange(sam: Unit, currentTick: number): number {
+    // An aircraft carrier's small SAM (CarrierExecution).
+    if (sam.type() === UnitType.AircraftCarrier) {
+      return this.carrierSamRange();
+    }
     const state = sam.samLauncherState();
     if (state === undefined || state.upgradeStartTick === undefined) {
       return this.samRange(sam.level());

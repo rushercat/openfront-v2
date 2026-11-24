@@ -398,8 +398,11 @@ function checkStructure(doc: ScenarioDocument, s: ScenarioStructure): void {
   if (doc.config.disabledUnits?.includes(s.type)) {
     throw new Error(`${s.type} is disabled in this scenario`);
   }
-  // The one structure Config doesn't make upgradable.
-  if (s.level > 1 && s.type === UnitType.DefensePost) {
+  // The structures Config doesn't make upgradable.
+  if (
+    s.level > 1 &&
+    (s.type === UnitType.DefensePost || s.type === UnitType.Capital)
+  ) {
     throw new Error(`${s.type} has no levels`);
   }
 }
